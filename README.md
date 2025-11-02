@@ -1,3 +1,6 @@
+<a href="https://ascl.net/2008.024"><img src="https://img.shields.io/badge/ascl-2008.024-blue.svg?colorB=262255" alt="ascl:2008.024" /></a>
+
+
 [![Test Suite (Regression & MPI)](https://github.com/ohahn/monofonIC/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/ohahn/monofonIC/actions/workflows/cmake-multi-platform.yml)
 
 # MUSIC2 - monofonIC
