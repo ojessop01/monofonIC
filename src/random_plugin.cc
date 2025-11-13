@@ -42,10 +42,9 @@ void print_RNG_plugins()
     music::ilog << "Available random number generator plug-ins:" << std::endl;
     while (it != m.end())
     {
-        if ((*it).second){
-            music::ilog.Print("\t\'%s\'\n", (*it).first.c_str());
-        }
-        ++it;
+        if( it->second )
+			music::ilog << "\t\'" << it->first << "\'\n";
+		++it;
     }
     music::ilog << std::endl;
 }
