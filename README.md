@@ -1,3 +1,4 @@
+<a href="https://ascl.net/2008.024"><img src="https://img.shields.io/badge/ascl-2008.024-blue.svg?colorB=262255" alt="ascl:2008.024" /></a>
 [![Test Suite (Regression & MPI)](https://github.com/ohahn/monofonIC/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/ohahn/monofonIC/actions/workflows/cmake-multi-platform.yml)
 
 # MUSIC2 - monofonIC
@@ -31,7 +32,8 @@ New modules/plugins can be easily added (see how to contribute in CONTRIBUTING.m
 
 ## Contributors
 - HACC file format plugin: Michael Buehlmann
-- primordial non-Gaussianity support: Thomas Montandon, Adrian Gutierrez
+- SWIFT file format plugin: Matthieu Schaller
+- primordial non-Gaussianity support: Thomas Montandon, Adrian Gutierrez Adame
 - PANPHASIA2 module: Adrian Jenkins
 
 ## Contributing and Licensing
