@@ -285,7 +285,7 @@ namespace cosmology
             // other parameters
             //--------------------------------------------------------------------------------
 
-            auto tfstring = cf.get_value_safe<std::string>("cosmology","TransferComponent","total");
+            auto tfstring = cf.get_value_safe<std::string>("cosmology","TransferComponent","matter");
             // Convert to lowercase for case-insensitive comparison
             std::transform(tfstring.begin(), tfstring.end(), tfstring.begin(), ::tolower);
             

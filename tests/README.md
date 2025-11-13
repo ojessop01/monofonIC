@@ -48,13 +48,35 @@ All tests use:
 
 **Note**: This test is automatically skipped if MPI is not available.
 
+### LPT Analytical Tests
+
+Three additional tests (`test_plane_wave_model1`, `test_plane_wave_model2`, `test_plane_wave_model3`) exercise the built-in plane-wave diagnostics to confirm that the LPT implementation reproduces simple, fully-analytic solutions:
+
+| Model | Analytical displacement potential (x component only) |
+|-------|-------------------------------------------------------|
+| 1 | `sin(qx) + sin(qy) + sin(qz)` |
+| 2 | `sin(qx) + sin(qy) * sin(qz)` |
+| 3 | `sin(qx) * (sin(qy) + sin(qz))` |
+
+Each test:
+
+- runs a dedicated configuration with the corresponding plane-wave model enabled,
+- captures the gradient/curl fields written to the diagnostic HDF5 file (for `grad_phi{1,2,3[a,b]}` and `curl_A3c`), and
+- compares every LPT contribution that feeds the displacement field against the analytical expressions implemented in `tests/scripts/test_plane_wave_model*.py`.
+
+Because monofonIC outputs `phi(n) * g_n`, these comparisons also validate the growth factors implicitly. The scripts recompute `g1`, `g2`, `g3a`, `g3b`, `g3c` directly from the cosmology parameters in the config using the approximations documented in [arXiv:2205.11347](https://arxiv.org/abs/2205.11347), ensuring that both the spatial dependence and the amplitude evolution agree with the theory.
+
+The symbolic derivations for the plane-wave solutions are preserved in the Mathematica notebook `tests/validation/analytical_lpt_model1.nb`.
+
+> **Note:** Evaluating the growth factors requires either `scipy` or `mpmath` (the tests will use whichever is available).
+
 ## Running Tests
 
 ### Prerequisites
 
 ```bash
-# Python 3 with h5py and numpy
-pip3 install h5py numpy
+# Python 3 with h5py, numpy, and mpmath (or scipy)
+pip3 install h5py numpy mpmath
 ```
 
 ### Building with Tests
@@ -395,4 +417,3 @@ git commit -m "Update transfer function references after [description]"
 Transfer function tests run automatically in GitHub Actions CI:
 - Executed on every push/PR to `master`
 - Separate from IC generation tests 
-

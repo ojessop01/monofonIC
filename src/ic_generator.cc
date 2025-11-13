@@ -21,9 +21,14 @@
 #include <convolution.hh>
 #include <testing.hh>
 
+#include <ic_analytical.hh>
 #include <ic_generator.hh>
 #include <particle_generator.hh>
 #include <particle_plt.hh>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include <unistd.h> // for unlink
 
@@ -298,6 +303,9 @@ int run( config_file& the_config )
     // temporary storage of additional data
     Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
 
+    analytical::PlaneWaveState plane_wave_state;
+    auto &plane_wave_ctx = plane_wave_state.context;
+
     //--------------------------------------------------------------------
     // Use externally specified large scale modes from constraints in case
     // TODO: move to separate routine
@@ -493,6 +501,8 @@ int run( config_file& the_config )
     }
     phi.zero_DC_mode();
 
+    analytical::configure_plane_wave(the_config, boxlen, g1, phi, plane_wave_state);
+
     music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
 
     //======================================================================
@@ -602,6 +612,16 @@ int run( config_file& the_config )
             (*A3[1]) *= g3c;
             (*A3[2]) *= g3c;
         }
+    }
+
+    if (plane_wave_state.context.enabled && CONFIG::MPI_task_rank == 0)
+    {
+        music::ilog << "Plane-wave growth factors: "
+                    << "g1=" << g1
+                    << ", g2=" << g2
+                    << ", g3a=" << g3a
+                    << ", g3b=" << g3b
+                    << ", g3c=" << g3c << std::endl;
     }
 
     music::ilog << music::HRULE << std::endl;
@@ -846,6 +866,19 @@ int run( config_file& the_config )
                     A3[2]->FourierTransformForward();
                 }
                 wnoise.FourierTransformForward();
+                analytical::dump_plane_wave_gradients(
+                    the_config,
+                    plane_wave_state,
+                    LPTorder,
+                    phi,
+                    phi2,
+                    phi3a,
+                    phi3b,
+                    A3,
+                    tmp,
+                    [&](int grad_dim, const std::array<size_t,3>& ijk) {
+                        return lg.gradient(grad_dim, ijk);
+                    });
             
                 // write out positions
                 for( int idim=0; idim<3; ++idim ){
@@ -856,7 +889,7 @@ int run( config_file& the_config )
                     tmp.FourierTransformForward(false);
 
                     // combine the various LPT potentials into one and take gradient
-                    #pragma omp parallel for
+                    #pragma omp parallel for 
                     for (size_t i = 0; i < phi.size(0); ++i) {
                         for (size_t j = 0; j < phi.size(1); ++j) {
                             for (size_t k = 0; k < phi.size(2); ++k) {
@@ -1003,4 +1036,3 @@ int run( config_file& the_config )
 
 
 } // end namespace ic_generator
-
