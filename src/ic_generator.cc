@@ -304,7 +304,6 @@ int run( config_file& the_config )
     Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
 
     analytical::PlaneWaveState plane_wave_state;
-    auto &plane_wave_ctx = plane_wave_state.context;
 
     //--------------------------------------------------------------------
     // Use externally specified large scale modes from constraints in case

@@ -56,14 +56,14 @@ bool configure_plane_wave(config_file &cfg,
 
 using gradient_eval_fn = std::function<ccomplex_t(int, const std::array<size_t, 3> &)>;
 
-void dump_plane_wave_gradients(config_file &cfg,
+void dump_plane_wave_gradients(const config_file &cfg,
                                PlaneWaveState &state,
                                int LPTorder,
                                Grid_FFT<real_t> &phi,
                                Grid_FFT<real_t> &phi2,
                                Grid_FFT<real_t> &phi3a,
                                Grid_FFT<real_t> &phi3b,
-                               std::array<Grid_FFT<real_t> *, 3> &A3,
+                               const std::array<Grid_FFT<real_t> *, 3> &A3,
                                Grid_FFT<real_t> &tmp,
                                const gradient_eval_fn &gradient_eval);
 
