@@ -42,10 +42,9 @@ void print_RNG_plugins()
     music::ilog << "Available random number generator plug-ins:" << std::endl;
     while (it != m.end())
     {
-        if ((*it).second){
-            music::ilog.Print("\t\'%s\'\n", (*it).first.c_str());
-        }
-        ++it;
+        if( it->second )
+			music::ilog << "\t\'" << it->first << "\'\n";
+		++it;
     }
     music::ilog << std::endl;
 }
@@ -73,8 +72,8 @@ std::unique_ptr<RNG_plugin> select_RNG_plugin(config_file &cf)
     }
     else
     {
-        music::ilog << "-------------------------------------------------------------------------------" << std::endl;
-        music::ilog << std::setw(32) << std::left << "Random number generator plugin" << " : " << rngname << std::endl;
+        music::ilog << music::HRULE << std::endl;
+        music::ilog << std::setw(32) << std::left << "Random number generator plugin" << " : " << colors::CONFIG_VALUE << rngname << colors::RESET << std::endl;
     }
 
     return the_RNG_plugin_creator->Create(cf);

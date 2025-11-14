@@ -76,6 +76,40 @@ function(add_regression_test TEST_NAME CONFIG_FILE OUTPUT_FILE)
     endif()
 endfunction()
 
+function(add_plane_wave_test TEST_NAME CONFIG_FILE DIAG_FILENAME OUTPUT_FILENAME CHECK_SCRIPT)
+    set(CONFIG_SOURCE "${TEST_CONFIG_DIR}/${CONFIG_FILE}")
+    set(CONFIG_BINARY "${CMAKE_CURRENT_BINARY_DIR}/${CONFIG_FILE}")
+    configure_file(${CONFIG_SOURCE} ${CONFIG_BINARY} COPYONLY)
+
+    get_filename_component(CONFIG_DIR "${CONFIG_BINARY}" DIRECTORY)
+    get_filename_component(CONFIG_NAME_WE "${CONFIG_BINARY}" NAME_WE)
+    set(CONFIG_BASENAME "${CONFIG_DIR}/${CONFIG_NAME_WE}")
+
+    set(DIAG_PATH "${CONFIG_BASENAME}_${DIAG_FILENAME}")
+    set(OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_FILENAME}")
+    set(CHECK_SCRIPT_PATH "${TEST_SCRIPT_DIR}/${CHECK_SCRIPT}")
+
+    add_test(
+        NAME ${TEST_NAME}
+        COMMAND ${CMAKE_COMMAND}
+            -DMONOFONIC_EXECUTABLE=$<TARGET_FILE:monofonIC>
+            -DCONFIG_FILE=${CONFIG_BINARY}
+            -DOUTPUT_FILE=${OUTPUT_PATH}
+            -DDIAG_FILE=${DIAG_PATH}
+            -DCHECK_SCRIPT=${CHECK_SCRIPT_PATH}
+            -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/run_plane_wave_test.cmake
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 300
+        LABELS "regression;plane-wave"
+    )
+
+    message(STATUS "Test ${TEST_NAME}: Registered")
+endfunction()
+
 # Register the 5 regression tests
 add_regression_test(
     test_1lpt_sc_generic
@@ -105,6 +139,30 @@ add_regression_test(
     test_2lpt_baryons_vrel_gadget
     test_2lpt_baryons_vrel_gadget.conf
     test_2lpt_baryons_vrel_gadget.hdf5
+)
+
+add_plane_wave_test(
+    test_plane_wave_model1
+    test_plane_wave_model1.conf
+    plane_wave_model1_diag.hdf5
+    plane_wave_model1_output.hdf5
+    test_plane_wave_model1.py
+)
+
+add_plane_wave_test(
+    test_plane_wave_model2
+    test_plane_wave_model2.conf
+    plane_wave_model2_diag.hdf5
+    plane_wave_model2_output.hdf5
+    test_plane_wave_model2.py
+)
+
+add_plane_wave_test(
+    test_plane_wave_model3
+    test_plane_wave_model3.conf
+    plane_wave_model3_diag.hdf5
+    plane_wave_model3_output.hdf5
+    test_plane_wave_model3.py
 )
 
 # Add a test to verify the comparison script itself works
@@ -146,3 +204,167 @@ if(MPI_CXX_FOUND)
 else()
     message(STATUS "Test test_mpi_consistency: Skipped (MPI not available)")
 endif()
+
+#########################################################################################
+# Transfer function regression tests
+#########################################################################################
+
+# Build test_transfer_functions executable
+# Include all source files except main.cc
+file(GLOB TEST_TRANSFER_SOURCES
+    ${PROJECT_SOURCE_DIR}/src/*.cc
+)
+list(FILTER TEST_TRANSFER_SOURCES EXCLUDE REGEX ".*main\\.cc$")
+
+# Get plugin files - only transfer function and random plugins (exclude output plugins)
+file(GLOB TEST_TRANSFER_PLUGINS
+    ${PROJECT_SOURCE_DIR}/src/plugins/transfer_*.cc
+    ${PROJECT_SOURCE_DIR}/src/plugins/random_*.cc
+)
+
+# Add the test executable (no version.cc needed since we exclude output plugins)
+add_executable(test_transfer_functions
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_transfer_functions.cc
+    ${TEST_TRANSFER_SOURCES}
+    ${TEST_TRANSFER_PLUGINS}
+)
+
+# Add PANPHASIA sources if enabled (same as main executable)
+if(ENABLE_PANPHASIA)
+    if(ENABLE_MPI)
+        target_sources(test_transfer_functions PRIVATE
+            ${PROJECT_SOURCE_DIR}/external/panphasia/panphasia_routines.f
+            ${PROJECT_SOURCE_DIR}/external/panphasia/generic_lecuyer.f90
+            ${PROJECT_SOURCE_DIR}/external/panphasia_ho/high_order_panphasia_routines.c
+            ${PROJECT_SOURCE_DIR}/external/panphasia_ho/pan_mpi_routines.c
+            ${PROJECT_SOURCE_DIR}/external/panphasia_ho/uniform_rand_threefry4x64.c
+        )
+    endif()
+endif()
+
+# C++ standard and compile options are inherited from parent CMakeLists.txt
+
+# Include directories
+target_include_directories(test_transfer_functions PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/external
+)
+
+# Link libraries (same as main executable)
+target_link_libraries(test_transfer_functions PRIVATE GSL::gsl)
+
+# MPI and FFTW3 linking (same logic as main executable)
+if(MPI_CXX_FOUND)
+    if(CODE_PRECISION STREQUAL "FLOAT")
+        if(FFTW3_SINGLE_MPI_FOUND)
+            target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_SINGLE_MPI)
+            target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_MPI")
+        endif()
+    elseif(CODE_PRECISION STREQUAL "DOUBLE")
+        if(FFTW3_DOUBLE_MPI_FOUND)
+            target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_DOUBLE_MPI)
+            target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_MPI")
+        endif()
+    elseif(CODE_PRECISION STREQUAL "LONGDOUBLE")
+        if(FFTW3_LONGDOUBLE_MPI_FOUND)
+            target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_LONGDOUBLE_MPI)
+            target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_MPI")
+        endif()
+    endif()
+    target_link_libraries(test_transfer_functions PRIVATE MPI::MPI_CXX)
+    target_compile_definitions(test_transfer_functions PRIVATE "USE_MPI")
+endif()
+
+# FFTW3 serial/threads
+if(CODE_PRECISION STREQUAL "FLOAT")
+    if(FFTW3_SINGLE_THREADS_FOUND)
+        target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_SINGLE_THREADS)
+        target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_THREADS")
+    endif()
+    target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_SINGLE_SERIAL)
+elseif(CODE_PRECISION STREQUAL "DOUBLE")
+    if(FFTW3_DOUBLE_THREADS_FOUND)
+        target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_DOUBLE_THREADS)
+        target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_THREADS")
+    endif()
+    target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_DOUBLE_SERIAL)
+elseif(CODE_PRECISION STREQUAL "LONGDOUBLE")
+    if(FFTW3_LONGDOUBLE_THREADS_FOUND)
+        target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_LONGDOUBLE_THREADS)
+        target_compile_definitions(test_transfer_functions PRIVATE "USE_FFTW_THREADS")
+    endif()
+    target_link_libraries(test_transfer_functions PRIVATE FFTW3::FFTW3_LONGDOUBLE_SERIAL)
+endif()
+
+# HDF5
+if(HDF5_FOUND)
+    target_link_libraries(test_transfer_functions PRIVATE ${HDF5_LIBRARIES})
+    target_include_directories(test_transfer_functions PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_compile_definitions(test_transfer_functions PRIVATE "USE_HDF5")
+endif()
+
+# PANPHASIA
+if(ENABLE_PANPHASIA)
+    target_compile_definitions(test_transfer_functions PRIVATE "USE_PANPHASIA")
+endif()
+
+# CLASS
+if(ENABLE_CLASS)
+    target_link_libraries(test_transfer_functions PRIVATE class::libclass)
+    target_compile_definitions(test_transfer_functions PRIVATE "USE_CLASS")
+endif()
+
+# Helper function to add a transfer function regression test
+function(add_transfer_test PLUGIN_NAME CONFIG_NAME)
+    set(TEST_NAME "test_transfer_${PLUGIN_NAME}_${CONFIG_NAME}")
+    set(CONFIG_FILE "${TEST_CONFIG_DIR}/transfer/${CONFIG_NAME}.conf")
+    set(REFERENCE_FILE "${TEST_REFERENCE_DIR}/transfer/${PLUGIN_NAME}/${CONFIG_NAME}.txt")
+    set(COMPARE_TF_SCRIPT "${TEST_SCRIPT_DIR}/compare_transfer_functions.py")
+
+    # Add test
+    add_test(
+        NAME ${TEST_NAME}
+        COMMAND $<TARGET_FILE:test_transfer_functions>
+                --test
+                ${PLUGIN_NAME}
+                ${CONFIG_FILE}
+                ${REFERENCE_FILE}
+                1e-6  # rtol
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    # Set test properties
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120  # 2 minute timeout
+        LABELS "transfer;regression"
+    )
+
+    # Check if reference file exists
+    if(NOT EXISTS ${REFERENCE_FILE})
+        set_tests_properties(${TEST_NAME} PROPERTIES DISABLED TRUE)
+        message(STATUS "Test ${TEST_NAME}: Reference file not found - test will be disabled")
+    else()
+        message(STATUS "Test ${TEST_NAME}: Registered")
+    endif()
+endfunction()
+
+# Register transfer function tests
+# Test configurations
+set(TF_CONFIGS fiducial dark_energy massive_nu low_omega_m high_z)
+
+# CLASS plugin tests (all configs)
+if(ENABLE_CLASS)
+    foreach(CONFIG ${TF_CONFIGS})
+        add_transfer_test("CLASS" ${CONFIG})
+    endforeach()
+endif()
+
+# Eisenstein plugin tests (all configs)
+foreach(CONFIG ${TF_CONFIGS})
+    add_transfer_test("eisenstein" ${CONFIG})
+endforeach()
+
+message(STATUS "")
+message(STATUS "Transfer function regression tests configured")
+message(STATUS "  Generate references with: cd build && bash ../tests/scripts/generate_transfer_references.sh")
+message(STATUS "  Run tests with: ctest -R test_transfer")

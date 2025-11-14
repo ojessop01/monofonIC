@@ -90,6 +90,8 @@ public:
     }
   }
 
+  std::string get_path_relative_to_config(std::string const &filename) const;
+
   //! constructor of class config_file
   /*! @param filename the path/name of the configuration file to be parsed
    */
@@ -162,9 +164,14 @@ public:
 
       items_[in_section + '/' + name] = value;
     }
-      size_t lastindex = filename.find_last_of('.');
-      std::string config_basename = filename.substr(0, lastindex);
-      items_["meta/config_basename"] = config_basename;
+    const size_t lastdot = filename.find_last_of('.');
+    const std::string config_basepath = filename.substr(0, lastdot);
+    const size_t lastslash = config_basepath.find_last_of('/');
+    const std::string config_basename = lastslash == std::string::npos
+                                    ? config_basepath
+                                    : config_basepath.substr(lastslash + 1);
+    items_["meta/config_basepath"] = config_basepath;
+    items_["meta/config_basename"] = config_basename;
   }
 
   //! inserts a key/value pair in the hash map
@@ -291,11 +298,6 @@ public:
     return get_value_safe("", key, default_value);
   }
 
-  std::string get_path_relative_to_config(std::string const &filename) const {
-    std::string empty_string;
-    const std::string basename = get_value_safe("meta", "config_basename", empty_string);
-    return basename + "_" + filename;
-  }
 
   //! dumps all key-value pairs to a std::ostream
   void dump(std::ostream &out) {
@@ -387,4 +389,15 @@ inline void
 config_file::convert<std::string, std::string>(const std::string &ival,
                                               std::string &oval) const {
   oval = ival;
+}
+
+
+inline std::string config_file::get_path_relative_to_config(std::string const &filename) const {
+  const std::string empty_string;
+  const auto output_relative_to_config=get_value_safe<bool>("output","relative_to_config",false);
+
+  const std::string basename = output_relative_to_config
+                                 ? get_value_safe("meta", "config_basepath", empty_string)
+                                 : get_value_safe("meta", "config_basename", empty_string);
+  return basename + "_" + filename;
 }
