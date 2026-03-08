@@ -153,6 +153,9 @@ namespace cosmology
                 pmap_["StreamingVelocityY_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocityY_kms", 0.0);
                 pmap_["StreamingVelocityZ_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocityZ_kms", 0.0);
 
+                // isocurvature perturbations (mass perturbations)
+                pmap_["DoIsocurvature"] = cf.get_value_safe<bool>("setup", "DoIsocurvature", true);
+
             }else{
 
                 //-------------------------------------------------------------------------------

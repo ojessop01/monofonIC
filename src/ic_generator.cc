@@ -686,7 +686,7 @@ int run( config_file& the_config )
             }
 
             // set the perturbed particle masses if we have baryons
-            if( bDoBaryons && (the_output_plugin->write_species_as( this_species ) == output_type::particles
+            if( bDoBaryons && the_cosmo_calc->cosmo_param_["DoIsocurvature"] && (the_output_plugin->write_species_as( this_species ) == output_type::particles
                 || the_output_plugin->write_species_as( this_species ) == output_type::field_lagrangian) ) 
             {
                 bool secondary_lattice = (this_species == cosmo_species::baryon &&
@@ -937,6 +937,22 @@ int run( config_file& the_config )
                 }
 
                 // write out velocities
+                if( the_cosmo_calc->cosmo_param_["DoStreamingVelocity"] )
+                {
+                    const real_t v_mag = the_cosmo_calc->cosmo_param_["StreamingVelocity_kms"];
+                    const real_t v_vx = the_cosmo_calc->cosmo_param_["StreamingVelocityX_kms"];
+                    const real_t v_vy = the_cosmo_calc->cosmo_param_["StreamingVelocityY_kms"];
+                    const real_t v_vz = the_cosmo_calc->cosmo_param_["StreamingVelocityZ_kms"];
+                    real_t v_norm = std::sqrt(v_vx*v_vx + v_vy*v_vy + v_vz*v_vz);
+                    
+                    music::ilog << "Applying large scale streaming velocity of " << v_mag << " km/s";
+                    if( v_norm > 1e-12 )
+                        music::ilog << " in direction (" << v_vx/v_norm << ", " << v_vy/v_norm << ", " << v_vz/v_norm << ")";
+                    else
+                        music::ilog << " along x-axis (default)";
+                    music::ilog << " to " << cosmo_species_name[this_species] << std::endl;
+                }
+
                 for( int idim=0; idim<3; ++idim ){
                     // cyclic rotations of indices
                     int idimp = (idim+1)%3, idimpp = (idim+2)%3;
