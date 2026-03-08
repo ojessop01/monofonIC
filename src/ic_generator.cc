@@ -679,10 +679,12 @@ int run( config_file& the_config )
                 // allocate particle structure and generate particle IDs
                 bool secondary_lattice = (this_species == cosmo_species::baryon &&
                                         the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
+                
+                bool do_mass_perturbations = bDoBaryons && the_cosmo_calc->cosmo_param_["DoIsocurvature"];
 
                 particle_lattice_generator_ptr = 
                 std::make_unique<particle::lattice_generator<Grid_FFT<real_t>>>( lattice_type, secondary_lattice, the_output_plugin->has_64bit_reals(), the_output_plugin->has_64bit_ids(), 
-                    bDoBaryons, IDoffset, tmp, the_config );
+                    do_mass_perturbations, IDoffset, tmp, the_config );
             }
 
             // set the perturbed particle masses if we have baryons
@@ -692,6 +694,14 @@ int run( config_file& the_config )
                 if( !the_cosmo_calc->cosmo_param_["DoIsocurvature"] )
                 {
                     music::ilog << "Disabling isocurvature perturbations (mass perturbations) for " << cosmo_species_name[this_species] << std::endl;
+                    if( the_output_plugin->write_species_as( this_species ) == output_type::field_lagrangian ){
+                        Grid_FFT<real_t> rho({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+                        const real_t munit = the_output_plugin->mass_unit();
+                        rho.apply_function_r( [&]( auto prho ){
+                            return Omega[this_species] * munit;
+                        });
+                        the_output_plugin->write_grid_data( rho, this_species, fluid_component::mass );
+                    }
                 }
                 else
                 {
@@ -965,6 +975,27 @@ int run( config_file& the_config )
                     int idimp = (idim+1)%3, idimpp = (idim+2)%3;
                     const real_t vunit = the_output_plugin->velocity_unit();
                     
+                    real_t v_stream_comp = 0.0;
+                    if( the_cosmo_calc->cosmo_param_["DoStreamingVelocity"] )
+                    {
+                        const real_t v_mag = the_cosmo_calc->cosmo_param_["StreamingVelocity_kms"];
+                        const real_t v_vx = the_cosmo_calc->cosmo_param_["StreamingVelocityX_kms"];
+                        const real_t v_vy = the_cosmo_calc->cosmo_param_["StreamingVelocityY_kms"];
+                        const real_t v_vz = the_cosmo_calc->cosmo_param_["StreamingVelocityZ_kms"];
+                        real_t v_norm = std::sqrt(v_vx*v_vx + v_vy*v_vy + v_vz*v_vz);
+                        
+                        if( v_norm > 1e-12 )
+                        {
+                            if( idim == 0 ) v_stream_comp = v_mag * v_vx / v_norm;
+                            else if( idim == 1 ) v_stream_comp = v_mag * v_vy / v_norm;
+                            else if( idim == 2 ) v_stream_comp = v_mag * v_vz / v_norm;
+                        }
+                        else if( idim == 0 )
+                        {
+                            v_stream_comp = v_mag; // fallback to pure x-axis
+                        }
+                    }
+
                     tmp.FourierTransformForward(false);
 
                     #pragma omp parallel for
@@ -1014,26 +1045,6 @@ int run( config_file& the_config )
                                 // apply streaming velocity
                                 if( the_cosmo_calc->cosmo_param_["DoStreamingVelocity"] )
                                 {
-                                    const real_t v_mag = the_cosmo_calc->cosmo_param_["StreamingVelocity_kms"];
-                                    const real_t v_vx = the_cosmo_calc->cosmo_param_["StreamingVelocityX_kms"];
-                                    const real_t v_vy = the_cosmo_calc->cosmo_param_["StreamingVelocityY_kms"];
-                                    const real_t v_vz = the_cosmo_calc->cosmo_param_["StreamingVelocityZ_kms"];
-
-                                    real_t v_stream_comp = 0.0;
-                                    real_t v_norm = std::sqrt(v_vx*v_vx + v_vy*v_vy + v_vz*v_vz);
-                                    
-                                    if( v_norm > 1e-12 )
-                                    {
-                                        if( idim == 0 ) v_stream_comp = v_mag * v_vx / v_norm;
-                                        else if( idim == 1 ) v_stream_comp = v_mag * v_vy / v_norm;
-                                        else if( idim == 2 ) v_stream_comp = v_mag * v_vz / v_norm;
-                                    }
-                                    else if( idim == 0 )
-                                    {
-                                        // fallback to pure x-axis if vector is zero
-                                        v_stream_comp = v_mag;
-                                    }
-
                                     if( this_species == cosmo_species::baryon )
                                         tmp.kelem(idx) += 0.5 * v_stream_comp;
                                     else if( this_species == cosmo_species::dm )
