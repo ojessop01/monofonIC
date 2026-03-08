@@ -686,35 +686,42 @@ int run( config_file& the_config )
             }
 
             // set the perturbed particle masses if we have baryons
-            if( bDoBaryons && the_cosmo_calc->cosmo_param_["DoIsocurvature"] && (the_output_plugin->write_species_as( this_species ) == output_type::particles
+            if( bDoBaryons && (the_output_plugin->write_species_as( this_species ) == output_type::particles
                 || the_output_plugin->write_species_as( this_species ) == output_type::field_lagrangian) ) 
             {
-                bool secondary_lattice = (this_species == cosmo_species::baryon &&
-                                        the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
+                if( !the_cosmo_calc->cosmo_param_["DoIsocurvature"] )
+                {
+                    music::ilog << "Disabling isocurvature perturbations (mass perturbations) for " << cosmo_species_name[this_species] << std::endl;
+                }
+                else
+                {
+                    bool secondary_lattice = (this_species == cosmo_species::baryon &&
+                                            the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
 
-                const real_t munit = the_output_plugin->mass_unit();
+                    const real_t munit = the_output_plugin->mass_unit();
 
-                //======================================================================
-                // initialise rho
-                //======================================================================
-                Grid_FFT<real_t> rho({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+                    //======================================================================
+                    // initialise rho
+                    //======================================================================
+                    Grid_FFT<real_t> rho({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
 
-                wnoise.FourierTransformForward();
-                rho.FourierTransformForward(false);
-                rho.assign_function_of_grids_kdep( [&]( auto k, auto wn ){
-                    return wn * the_cosmo_calc->get_amplitude_delta_bc(k.norm(),bDoLinearBCcorr);
-                }, wnoise );
-                rho.zero_DC_mode();
-                rho.FourierTransformBackward();
+                    wnoise.FourierTransformForward();
+                    rho.FourierTransformForward(false);
+                    rho.assign_function_of_grids_kdep( [&]( auto k, auto wn ){
+                        return wn * the_cosmo_calc->get_amplitude_delta_bc(k.norm(),bDoLinearBCcorr);
+                    }, wnoise );
+                    rho.zero_DC_mode();
+                    rho.FourierTransformBackward();
 
-                rho.apply_function_r( [&]( auto prho ){
-                    return (1.0 + C_species * prho) * Omega[this_species] * munit;
-                });
-                
-                if( the_output_plugin->write_species_as( this_species ) == output_type::particles ){
-                    particle_lattice_generator_ptr->set_masses( lattice_type, secondary_lattice, 1.0, the_output_plugin->has_64bit_reals(), rho, the_config );
-                }else if( the_output_plugin->write_species_as( this_species ) == output_type::field_lagrangian ){
-                    the_output_plugin->write_grid_data( rho, this_species, fluid_component::mass );
+                    rho.apply_function_r( [&]( auto prho ){
+                        return (1.0 + C_species * prho) * Omega[this_species] * munit;
+                    });
+                    
+                    if( the_output_plugin->write_species_as( this_species ) == output_type::particles ){
+                        particle_lattice_generator_ptr->set_masses( lattice_type, secondary_lattice, 1.0, the_output_plugin->has_64bit_reals(), rho, the_config );
+                    }else if( the_output_plugin->write_species_as( this_species ) == output_type::field_lagrangian ){
+                        the_output_plugin->write_grid_data( rho, this_species, fluid_component::mass );
+                    }
                 }
             }
 
