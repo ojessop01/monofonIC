@@ -987,6 +987,35 @@ int run( config_file& the_config )
 
                                 // divide by Lbox, because displacement is in box units for output plugin
                                 tmp.kelem(idx) *= vunit / boxlen;
+
+                                // apply streaming velocity
+                                if( the_cosmo_calc->cosmo_param_["DoStreamingVelocity"] )
+                                {
+                                    const real_t v_mag = the_cosmo_calc->cosmo_param_["StreamingVelocity_kms"];
+                                    const real_t v_vx = the_cosmo_calc->cosmo_param_["StreamingVelocityX_kms"];
+                                    const real_t v_vy = the_cosmo_calc->cosmo_param_["StreamingVelocityY_kms"];
+                                    const real_t v_vz = the_cosmo_calc->cosmo_param_["StreamingVelocityZ_kms"];
+
+                                    real_t v_stream_comp = 0.0;
+                                    real_t v_norm = std::sqrt(v_vx*v_vx + v_vy*v_vy + v_vz*v_vz);
+                                    
+                                    if( v_norm > 1e-12 )
+                                    {
+                                        if( idim == 0 ) v_stream_comp = v_mag * v_vx / v_norm;
+                                        else if( idim == 1 ) v_stream_comp = v_mag * v_vy / v_norm;
+                                        else if( idim == 2 ) v_stream_comp = v_mag * v_vz / v_norm;
+                                    }
+                                    else if( idim == 0 )
+                                    {
+                                        // fallback to pure x-axis if vector is zero
+                                        v_stream_comp = v_mag;
+                                    }
+
+                                    if( this_species == cosmo_species::baryon )
+                                        tmp.kelem(idx) += 0.5 * v_stream_comp;
+                                    else if( this_species == cosmo_species::dm )
+                                        tmp.kelem(idx) -= 0.5 * v_stream_comp;
+                                }
                             }
                         }
                     }

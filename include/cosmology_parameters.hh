@@ -146,6 +146,13 @@ namespace cosmology
                 pmap_["w_0"] = cf.get_value_safe<double>("cosmology", "w_0", defaultp["w_0"]);
                 pmap_["w_a"] = cf.get_value_safe<double>("cosmology", "w_a", defaultp["w_a"]);
 
+                // streaming velocity
+                pmap_["DoStreamingVelocity"] = cf.get_value_safe<bool>("setup", "DoStreamingVelocity", false);
+                pmap_["StreamingVelocity_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocity_kms", 0.0);
+                pmap_["StreamingVelocityX_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocityX_kms", 0.0);
+                pmap_["StreamingVelocityY_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocityY_kms", 0.0);
+                pmap_["StreamingVelocityZ_kms"] = cf.get_value_safe<double>("setup", "StreamingVelocityZ_kms", 0.0);
+
             }else{
 
                 //-------------------------------------------------------------------------------
