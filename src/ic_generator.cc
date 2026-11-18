@@ -396,7 +396,7 @@ int run( config_file& the_config )
     std::array<Grid_FFT<real_t> *, 3> A3({&A3x, &A3y, &A3z});
 
     // temporary storage of additional data
-    Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+    Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen}, false); // do not allocate until needed at output
 
     analytical::PlaneWaveState plane_wave_state;
 
@@ -490,16 +490,6 @@ int run( config_file& the_config )
     //--------------------------------------------------------------------
 
     //--------------------------------------------------------------------
-    // Create convolution class instance for non-linear terms
-    //--------------------------------------------------------------------
-#if defined(USE_CONVOLVER_ORSZAG)
-    OrszagConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
-#elif defined(USE_CONVOLVER_NAIVE)
-    NaiveConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
-#endif
-    //--------------------------------------------------------------------
-
-    //--------------------------------------------------------------------
     // Create PLT gradient operator
     //--------------------------------------------------------------------
 #if defined(ENABLE_PLT)
@@ -513,6 +503,18 @@ int run( config_file& the_config )
     species_list.push_back(cosmo_species::dm);
     if (bDoBaryons)
         species_list.push_back(cosmo_species::baryon);
+
+    // scope convolver so its buffers are freed before the output stage
+    {
+    //--------------------------------------------------------------------
+    // Create convolution class instance for non-linear terms
+    //--------------------------------------------------------------------
+#if defined(USE_CONVOLVER_ORSZAG)
+    OrszagConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+#elif defined(USE_CONVOLVER_NAIVE)
+    NaiveConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+#endif
+    //--------------------------------------------------------------------
 
     //======================================================================
     //... compute 1LPT displacement potential ....
@@ -698,6 +700,7 @@ int run( config_file& the_config )
         }
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
     }
+    } // end convolver scope
 
     ///... scale all potentials with respective growth factors
     phi *= g1;
@@ -782,6 +785,8 @@ int run( config_file& the_config )
                 // allocate particle structure and generate particle IDs
                 bool secondary_lattice = (this_species == cosmo_species::baryon &&
                                         the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
+
+                if( !tmp.is_allocated() ) tmp.allocate();
 
                 particle_lattice_generator_ptr = 
                 std::make_unique<particle::lattice_generator<Grid_FFT<real_t>>>( lattice_type, secondary_lattice, the_output_plugin->has_64bit_reals(), the_output_plugin->has_64bit_ids(), 
@@ -922,6 +927,7 @@ int run( config_file& the_config )
                 //======================================================================
                 Grid_FFT<ccomplex_t> grad_psi({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
                 const real_t vunit = Dplus0 * vfac1 / boxlen * the_output_plugin->velocity_unit();
+                if( !tmp.is_allocated() ) tmp.allocate();
                 for( int idim=0; idim<3; ++idim )
                 {
                     grad_psi.FourierTransformBackward(false);
@@ -953,6 +959,7 @@ int run( config_file& the_config )
                 bool shifted_lattice = (this_species == cosmo_species::baryon &&
                                         the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
 
+                if( !tmp.is_allocated() ) tmp.allocate();
                 
                 // The interpolator is only needed for the glass compensation kernel.
                 // Building it allocates and exchanges ghost slabs, so skip it for
