@@ -567,11 +567,12 @@ int run( config_file& the_config )
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(3a) term" << colors::RESET << std::setw(55) << std::setfill('.') << std::left << "" << std::endl;
         phi3a.allocate();
         phi3a.FourierTransformForward(false);
-        Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, phi, {2, 2}, op::assign_to(phi3a));
+        Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, op::assign_to(phi3a));
+        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi3a));
+        Conv.convolve_Field_and_Hessian(phi3a, phi, {2, 2}, op::assign_to(phi3a));
         Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 2}, phi, {1, 2}, op::multiply_add_to(phi3a,2.0));
-        Conv.convolve_Hessians(phi, {1, 2}, phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
-        Conv.convolve_Hessians(phi, {0, 2}, phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
-        Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 1}, phi, {2, 2}, op::subtract_from(phi3a));
+        Conv.convolve_HessianSquare_and_Hessian(phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
+        Conv.convolve_HessianSquare_and_Hessian(phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
         phi3a.apply_InverseLaplacian();
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
 
