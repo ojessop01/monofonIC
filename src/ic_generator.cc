@@ -160,6 +160,10 @@ int run( config_file& the_config )
     //! enable also back-scaled decaying relative velocity mode? only first order!
     const bool bDoLinearBCcorr = the_config.get_value_safe<bool>("setup", "DoBaryonVrel", false);
     music::ilog << "Baryon linear relative velocity mode is " << colors::CONFIG_VALUE << (bDoLinearBCcorr?"enabled":"disabled") << colors::RESET << std::endl;
+
+    //! accumulate real-space convolution products on padded grid before transforming back?
+    const bool bConvolverAccumulate = the_config.get_value_safe<bool>("execution", "ConvolverAccumulate", false);
+    music::ilog << "Convolver real-space accumulation is " << colors::CONFIG_VALUE << (bConvolverAccumulate ? "enabled" : "disabled") << colors::RESET << std::endl;
     // compute mass fractions 
     std::map< cosmo_species, double > Omega;
     if( bDoBaryons ){
@@ -517,6 +521,7 @@ int run( config_file& the_config )
     //======================================================================
     //... compute 2LPT displacement potential ....
     //======================================================================
+    size_t nfft_phi2 = 0, nfft_phi3a = 0, nfft_phi3b = 0, nfft_A3 = 0;
     if (LPTorder > 1)
     {
         phi2.allocate();
@@ -524,13 +529,30 @@ int run( config_file& the_config )
 
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(2) term" << colors::RESET << std::setw(56) << std::setfill('.') << std::left << "" << std::endl;
-        Conv.convolve_SumOfHessiansSquare(phi, {0, 0}, {1, 1}, {2, 2}, op::multiply_assign_to(phi2, real_t(0.5)));
-        Conv.convolve_HessianSquare(phi, {0, 0}, op::multiply_add_to(phi2, real_t(-0.5)));
-        Conv.convolve_HessianSquare(phi, {1, 1}, op::multiply_add_to(phi2, real_t(-0.5)));
-        Conv.convolve_HessianSquare(phi, {2, 2}, op::multiply_add_to(phi2, real_t(-0.5)));
-        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi2));
-        Conv.convolve_HessianSquare(phi, {0, 2}, op::subtract_from(phi2));
-        Conv.convolve_HessianSquare(phi, {1, 2}, op::subtract_from(phi2));
+        const size_t nfft0 = Conv.get_fft_count();
+        if (bConvolverAccumulate)
+        {
+            Conv.begin_accumulate();
+            Conv.accumulate_SumOfHessiansSquare(phi, {0, 0}, {1, 1}, {2, 2}, real_t(0.5));
+            Conv.accumulate_HessianSquare(phi, {0, 0}, real_t(-0.5));
+            Conv.accumulate_HessianSquare(phi, {1, 1}, real_t(-0.5));
+            Conv.accumulate_HessianSquare(phi, {2, 2}, real_t(-0.5));
+            Conv.accumulate_HessianSquare(phi, {0, 1}, real_t(-1.0));
+            Conv.accumulate_HessianSquare(phi, {0, 2}, real_t(-1.0));
+            Conv.accumulate_HessianSquare(phi, {1, 2}, real_t(-1.0));
+            Conv.finish_accumulate(op::assign_to(phi2));
+        }
+        else
+        {
+            Conv.convolve_SumOfHessiansSquare(phi, {0, 0}, {1, 1}, {2, 2}, op::multiply_assign_to(phi2, real_t(0.5)));
+            Conv.convolve_HessianSquare(phi, {0, 0}, op::multiply_add_to(phi2, real_t(-0.5)));
+            Conv.convolve_HessianSquare(phi, {1, 1}, op::multiply_add_to(phi2, real_t(-0.5)));
+            Conv.convolve_HessianSquare(phi, {2, 2}, op::multiply_add_to(phi2, real_t(-0.5)));
+            Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi2));
+            Conv.convolve_HessianSquare(phi, {0, 2}, op::subtract_from(phi2));
+            Conv.convolve_HessianSquare(phi, {1, 2}, op::subtract_from(phi2));
+        }
+        nfft_phi2 = Conv.get_fft_count() - nfft0;
 
         if (bAddExternalTides)
         {
@@ -558,21 +580,37 @@ int run( config_file& the_config )
     //======================================================================
     if (LPTorder > 2)
     {
-        
-
-
         //... phi3 = phi3a - 10/7 phi3b
         //... 3a term ...
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(3a) term" << colors::RESET << std::setw(55) << std::setfill('.') << std::left << "" << std::endl;
         phi3a.allocate();
         phi3a.FourierTransformForward(false);
-        Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, op::assign_to(phi3a));
-        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi3a));
-        Conv.convolve_Field_and_Hessian(phi3a, phi, {2, 2}, op::assign_to(phi3a));
-        Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 2}, phi, {1, 2}, op::multiply_add_to(phi3a,2.0));
-        Conv.convolve_HessianSquare_and_Hessian(phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
-        Conv.convolve_HessianSquare_and_Hessian(phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
+        size_t nfft0 = Conv.get_fft_count();
+        if (bConvolverAccumulate)
+        {
+            Conv.begin_accumulate();
+            Conv.accumulate_Hessians(phi, {0, 0}, phi, {1, 1});
+            Conv.accumulate_HessianSquare(phi, {0, 1}, real_t(-1.0));
+            Conv.finish_accumulate(op::assign_to(phi3a));
+
+            Conv.begin_accumulate();
+            Conv.accumulate_Field_and_Hessian(phi3a, phi, {2, 2});
+            Conv.accumulate_Hessians(phi, {0, 1}, phi, {0, 2}, phi, {1, 2}, real_t(2.0));
+            Conv.accumulate_HessianSquare_and_Hessian(phi, {1, 2}, phi, {0, 0}, real_t(-1.0));
+            Conv.accumulate_HessianSquare_and_Hessian(phi, {0, 2}, phi, {1, 1}, real_t(-1.0));
+            Conv.finish_accumulate(op::assign_to(phi3a));
+        }
+        else
+        {
+            Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, op::assign_to(phi3a));
+            Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi3a));
+            Conv.convolve_Field_and_Hessian(phi3a, phi, {2, 2}, op::assign_to(phi3a));
+            Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 2}, phi, {1, 2}, op::multiply_add_to(phi3a,2.0));
+            Conv.convolve_HessianSquare_and_Hessian(phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
+            Conv.convolve_HessianSquare_and_Hessian(phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
+        }
+        nfft_phi3a = Conv.get_fft_count() - nfft0;
         phi3a.apply_InverseLaplacian();
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
 
@@ -580,33 +618,74 @@ int run( config_file& the_config )
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(3b) term" << colors::RESET << std::setw(55) << std::setfill('.') << std::left << "" << std::endl;
         phi3b.allocate();
-        phi3b.zero();
         phi3b.FourierTransformForward(false);
-        Conv.convolve_SumOfHessians(phi, {0, 0}, phi2, {1, 1}, {2, 2}, op::multiply_add_to(phi3b,0.5));
-        Conv.convolve_SumOfHessians(phi, {1, 1}, phi2, {2, 2}, {0, 0}, op::multiply_add_to(phi3b,0.5));
-        Conv.convolve_SumOfHessians(phi, {2, 2}, phi2, {0, 0}, {1, 1}, op::multiply_add_to(phi3b,0.5));
-        Conv.convolve_Hessians(phi, {0, 1}, phi2, {0, 1}, op::multiply_add_to(phi3b, -1.0));
-        Conv.convolve_Hessians(phi, {0, 2}, phi2, {0, 2}, op::multiply_add_to(phi3b, -1.0));
-        Conv.convolve_Hessians(phi, {1, 2}, phi2, {1, 2}, op::multiply_add_to(phi3b, -1.0));
+        nfft0 = Conv.get_fft_count();
+        if (bConvolverAccumulate)
+        {
+            Conv.begin_accumulate();
+            Conv.accumulate_SumOfHessians(phi, {0, 0}, phi2, {1, 1}, {2, 2}, real_t(0.5));
+            Conv.accumulate_SumOfHessians(phi, {1, 1}, phi2, {2, 2}, {0, 0}, real_t(0.5));
+            Conv.accumulate_SumOfHessians(phi, {2, 2}, phi2, {0, 0}, {1, 1}, real_t(0.5));
+            Conv.accumulate_Hessians(phi, {0, 1}, phi2, {0, 1}, real_t(-1.0));
+            Conv.accumulate_Hessians(phi, {0, 2}, phi2, {0, 2}, real_t(-1.0));
+            Conv.accumulate_Hessians(phi, {1, 2}, phi2, {1, 2}, real_t(-1.0));
+            Conv.finish_accumulate(op::assign_to(phi3b));
+        }
+        else
+        {
+            phi3b.zero();
+            Conv.convolve_SumOfHessians(phi, {0, 0}, phi2, {1, 1}, {2, 2}, op::multiply_add_to(phi3b,0.5));
+            Conv.convolve_SumOfHessians(phi, {1, 1}, phi2, {2, 2}, {0, 0}, op::multiply_add_to(phi3b,0.5));
+            Conv.convolve_SumOfHessians(phi, {2, 2}, phi2, {0, 0}, {1, 1}, op::multiply_add_to(phi3b,0.5));
+            Conv.convolve_Hessians(phi, {0, 1}, phi2, {0, 1}, op::multiply_add_to(phi3b, -1.0));
+            Conv.convolve_Hessians(phi, {0, 2}, phi2, {0, 2}, op::multiply_add_to(phi3b, -1.0));
+            Conv.convolve_Hessians(phi, {1, 2}, phi2, {1, 2}, op::multiply_add_to(phi3b, -1.0));
+        }
+        nfft_phi3b = Conv.get_fft_count() - nfft0;
         phi3b.apply_InverseLaplacian();
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
 
         //... transversal term 3c...
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing A(3) term" << colors::RESET << std::setw(58) << std::setfill('.') << std::left << "" << std::endl;
+        nfft0 = Conv.get_fft_count();
         for (int idim = 0; idim < 3; ++idim)
         {
             // cyclic rotations of indices
             int idimp = (idim + 1) % 3, idimpp = (idim + 2) % 3;
             A3[idim]->allocate();
             A3[idim]->FourierTransformForward(false);
-            Conv.convolve_Hessians(phi2, {idim, idimp}, phi, {idim, idimpp}, op::assign_to(*A3[idim]));
-            Conv.convolve_Hessians(phi2, {idim, idimpp}, phi, {idim, idimp}, op::subtract_from(*A3[idim]));
-            Conv.convolve_DifferenceOfHessians(phi, {idimp, idimpp}, phi2, {idimp, idimp}, {idimpp, idimpp}, op::add_to(*A3[idim]));
-            Conv.convolve_DifferenceOfHessians(phi2, {idimp, idimpp}, phi, {idimp, idimp}, {idimpp, idimpp}, op::subtract_from(*A3[idim]));
+            if (bConvolverAccumulate)
+            {
+                Conv.begin_accumulate();
+                Conv.accumulate_Hessians(phi2, {idim, idimp}, phi, {idim, idimpp});
+                Conv.accumulate_Hessians(phi2, {idim, idimpp}, phi, {idim, idimp}, real_t(-1.0));
+                Conv.accumulate_DifferenceOfHessians(phi, {idimp, idimpp}, phi2, {idimp, idimp}, {idimpp, idimpp});
+                Conv.accumulate_DifferenceOfHessians(phi2, {idimp, idimpp}, phi, {idimp, idimp}, {idimpp, idimpp}, real_t(-1.0));
+                Conv.finish_accumulate(op::assign_to(*A3[idim]));
+            }
+            else
+            {
+                Conv.convolve_Hessians(phi2, {idim, idimp}, phi, {idim, idimpp}, op::assign_to(*A3[idim]));
+                Conv.convolve_Hessians(phi2, {idim, idimpp}, phi, {idim, idimp}, op::subtract_from(*A3[idim]));
+                Conv.convolve_DifferenceOfHessians(phi, {idimp, idimpp}, phi2, {idimp, idimp}, {idimpp, idimpp}, op::add_to(*A3[idim]));
+                Conv.convolve_DifferenceOfHessians(phi2, {idimp, idimpp}, phi, {idimp, idimp}, {idimpp, idimpp}, op::subtract_from(*A3[idim]));
+            }
             A3[idim]->apply_InverseLaplacian();
         }
+        nfft_A3 = Conv.get_fft_count() - nfft0;
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
+    }
+    if (LPTorder > 1)
+    {
+        const size_t nfft_lpt = nfft_phi2 + nfft_phi3a + nfft_phi3b + nfft_A3;
+        music::ilog << "Convolver FFTs (" << (bConvolverAccumulate ? "accumulate" : "default") << ") : "
+                    << colors::CONFIG_VALUE << nfft_lpt << colors::RESET << " (phi2=" << nfft_phi2;
+        if (LPTorder > 2)
+        {
+            music::ilog << ", phi3a=" << nfft_phi3a << ", phi3b=" << nfft_phi3b << ", A3=" << nfft_A3;
+        }
+        music::ilog << ")" << std::endl;
     }
     } // end convolver scope
 
