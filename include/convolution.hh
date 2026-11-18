@@ -68,6 +68,13 @@ public:
     template <typename kfunc1, typename kfunc2, typename kfunc3, typename opp>
     void convolve3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, opp op) {}
 
+    /// @brief implements triple convolution where the first two fields are identical (kf12^2 * kf3)
+    /// @tparam kfunc12 repeated inner field
+    /// @tparam kfunc3 outer field
+    /// @tparam opp output operator
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp op) {}
+
 public:
 
     /// @brief convolve two gradient fields in Fourier space a_{,i} * b_{,j}
@@ -220,6 +227,69 @@ public:
             output_op);
     }
 
+    /// @brief convolve a Fourier-space field with a Hessian field a * b_{,kl}
+    /// @tparam opp output operator type
+    /// @param inl left input field a
+    /// @param inr right input field b
+    /// @param d2r directions of Hessian (,kl)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_Field_and_Hessian(Grid_FFT<data_t> &inl,
+                                    Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                    opp output_op)
+    {
+        // transform to FS in case fields are not
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        // perform convolution of field and Hessian
+        static_cast<derived_t &>(*this).convolve2(
+            // first field
+            [&inl](size_t i, size_t j, size_t k) -> ccomplex_t {
+                return inl.kelem(i, j, k);
+            },
+            // second Hessian
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            // -> output operator
+            output_op);
+    }
+
+    /// @brief convolve squared Hessian field with another Hessian field in Fourier space (a_{,ij})^2 * c_{,mn}
+    /// @tparam opp output operator
+    /// @param inl first input field a (squared)
+    /// @param d2l directions of squared Hessian (,ij)
+    /// @param inr outer input field c
+    /// @param d2r directions of outer Hessian (,mn)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_HessianSquare_and_Hessian(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                            opp output_op)
+    {
+        // transform to FS in case fields are not
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        // perform triple convolution with squared inner Hessian
+        static_cast<derived_t &>(*this).convolve3_square(
+            // squared Hessian
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            // outer Hessian
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            // -> output operator
+            output_op);
+    }
+
     /// @brief convolve three Hessian fields in Fourier space a_{,ij} * b_{,kl} * c_{,mn}
     /// @tparam opp output operator
     /// @param inl first input field a
@@ -235,6 +305,11 @@ public:
                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
                            opp output_op)
     {
+        if (&inl == &inm && ((d2l[0] == d2m[0] && d2l[1] == d2m[1]) || (d2l[0] == d2m[1] && d2l[1] == d2m[0])))
+        {
+            convolve_HessianSquare_and_Hessian(inl, d2l, inr, d2r, output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inm.FourierTransformForward();
@@ -503,6 +578,45 @@ public:
         }
     }
 
+    /// @brief triple convolution where the first two fields are identical
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp output_op)
+    {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+        //... prepare and square inner field
+        fbuf2_->FourierTransformForward(false);
+        this->copy_in(kf12, *fbuf2_);
+        fbuf2_->FourierTransformBackward();
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf2_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf2_).relem(i);
+        }
+
+        //... prepare outer field
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf3, *fbuf1_);
+        fbuf1_->FourierTransformBackward();
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf1_).relem(i);
+        }
+
+        fbuf2_->FourierTransformForward();
+//... copy data back
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf2_->ntot_; ++i)
+        {
+            output_op(i, (*fbuf2_)[i]);
+        }
+    }
+
 //--------------------------------------------------------------------------------------------------------
 private:
 
@@ -675,6 +789,19 @@ public:
         auto assign_to = [](auto &g) { return [&](auto i, auto v) { g[i] = v; }; };
         fbuf_->FourierTransformForward(false);
         convolve2(kf1, kf2, assign_to(*fbuf_));
+        convolve2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, output_op);
+    }
+
+    /// @brief convolve squared field with outer field (kf12^2 * kf3)
+    /// @tparam kfunc12 abstract function type generating data for the squared inner field
+    /// @tparam kfunc3 abstract function type generating data for the outer field
+    /// @tparam opp abstract function type for the output operation
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp output_op)
+    {
+        auto assign_to = [](auto &g) { return [&](auto i, auto v) { g[i] = v; }; };
+        fbuf_->FourierTransformForward(false);
+        convolve_square(kf12, assign_to(*fbuf_));
         convolve2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, output_op);
     }
 
