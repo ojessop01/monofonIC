@@ -47,6 +47,12 @@ public:
     /// @brief destructor (virtual)
     virtual ~BaseConvolver() {}
 
+    /// @brief implements auto-convolution (squaring) of one Fourier-space field
+    /// @tparam kfunc field
+    /// @tparam opp output operator
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp op) {}
+
     /// @brief implements convolution of two Fourier-space fields
     /// @tparam kfunc1 field 1
     /// @tparam kfunc2 field 2
@@ -126,6 +132,56 @@ public:
             output_op);
     }
 
+    /// @brief auto-convolve (square) a Hessian field in Fourier space (a_{,ij})^2
+    /// @tparam opp output operator type
+    /// @param in input field a
+    /// @param d2 directions of Hessian (,ij)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_HessianSquare(Grid_FFT<data_t> &in, const std::array<int, 2> &d2, opp output_op)
+    {
+        // transform to FS in case field is not
+        in.FourierTransformForward();
+        // perform auto-convolution of Hessian
+        static_cast<derived_t &>(*this).convolve_square(
+            [&in, &d2](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = in.gradient(d2[0],{i,j,k});
+                auto grad2 = in.gradient(d2[1],{i,j,k});
+                return grad1*grad2*in.kelem(i, j, k);
+            },
+            output_op);
+    }
+
+    /// @brief auto-convolve (square) the sum of three Hessian fields in Fourier space (a_{,ij} + a_{,kl} + a_{,mn})^2
+    /// @tparam opp output operator type
+    /// @param in input field a
+    /// @param d2a directions of first Hessian (,ij)
+    /// @param d2b directions of second Hessian (,kl)
+    /// @param d2c directions of third Hessian (,mn)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_SumOfHessiansSquare(Grid_FFT<data_t> &in,
+                                      const std::array<int, 2> &d2a,
+                                      const std::array<int, 2> &d2b,
+                                      const std::array<int, 2> &d2c,
+                                      opp output_op)
+    {
+        // transform to FS in case field is not
+        in.FourierTransformForward();
+        // perform auto-convolution of sum of three Hessians
+        static_cast<derived_t &>(*this).convolve_square(
+            [&in, &d2a, &d2b, &d2c](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad11 = in.gradient(d2a[0],{i,j,k});
+                auto grad12 = in.gradient(d2a[1],{i,j,k});
+                auto grad21 = in.gradient(d2b[0],{i,j,k});
+                auto grad22 = in.gradient(d2b[1],{i,j,k});
+                auto grad31 = in.gradient(d2c[0],{i,j,k});
+                auto grad32 = in.gradient(d2c[1],{i,j,k});
+                return (grad11*grad12 + grad21*grad22 + grad31*grad32)*in.kelem(i, j, k);
+            },
+            output_op);
+    }
+
     /// @brief convolve two Hessian fields in Fourier space a_{,ij} * b_{,kl}
     /// @tparam opp output operator type
     /// @param inl left input field a
@@ -138,6 +194,11 @@ public:
                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
                            opp output_op)
     {
+        if (&inl == &inr && ((d2l[0] == d2r[0] && d2l[1] == d2r[1]) || (d2l[0] == d2r[1] && d2l[1] == d2r[0])))
+        {
+            convolve_HessianSquare(inl, d2l, output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inr.FourierTransformForward();
@@ -281,6 +342,14 @@ public:
     template <typename opp> // TOMA
     void multiply_field(Grid_FFT<data_t> &inl, Grid_FFT<data_t> &inr, opp output_op)
     {
+        if (&inl == &inr)
+        {
+            inl.FourierTransformForward();
+            static_cast<derived_t &>(*this).convolve_square(
+                [&inl](size_t i, size_t j, size_t k) -> ccomplex_t { return inl.kelem(i, j, k); },
+                output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inr.FourierTransformForward();
@@ -314,7 +383,7 @@ public:
         : BaseConvolver<data_t, NaiveConvolver<data_t>>(N, L)
     {
         fbuf1_ = new Grid_FFT<data_t>(N, length_, true, kspace_id);
-        fbuf2_ = new Grid_FFT<data_t>(N, length_, true, kspace_id);
+        fbuf2_ = nullptr;
     }
 
     /// @brief destructor
@@ -324,10 +393,39 @@ public:
         delete fbuf2_;
     }
 
+    /// @brief auto-convolution (squaring) of one field
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp output_op)
+    {
+        //... prepare data
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf, *fbuf1_);
+
+        //... square in real space
+        fbuf1_->FourierTransformBackward();
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            (*fbuf1_).relem(i) *= (*fbuf1_).relem(i);
+        }
+        fbuf1_->FourierTransformForward();
+//... copy data back
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            output_op(i, (*fbuf1_)[i]);
+        }
+    }
+
     /// @brief convolution of two fields
     template <typename kfunc1, typename kfunc2, typename opp>
     void convolve2(kfunc1 kf1, kfunc2 kf2, opp output_op)
     {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
         //... prepare data 1
         fbuf1_->FourierTransformForward(false);
         this->copy_in(kf1, *fbuf1_);
@@ -361,6 +459,10 @@ public:
     template <typename kfunc1, typename kfunc2, typename kfunc3, typename opp>
     void convolve3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, opp output_op)
     {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
         //... prepare data 1
         fbuf1_->FourierTransformForward(false);
         this->copy_in(kf1, *fbuf1_);
@@ -465,7 +567,7 @@ public:
     {
         //... create temporaries
         f1p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
-        f2p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        f2p_ = nullptr; // allocated lazily only if a two-field product is requested
         fbuf_ = new Grid_FFT<data_t>(N, length_, true, kspace_id); // needed for MPI, or for triple conv.
 
 #if defined(USE_MPI)
@@ -505,6 +607,29 @@ public:
 #endif
     }
 
+    /// @brief auto-convolve (square) one field using a single padded buffer
+    /// @tparam kfunc abstract function type generating data for the field
+    /// @tparam opp abstract function type for the output operation
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp output_op)
+    {
+        //... prepare data
+        f1p_->FourierTransformForward(false);
+        this->pad_insert(kf, *f1p_);
+
+        //... square in real space
+        f1p_->FourierTransformBackward();
+
+#pragma omp parallel for
+        for (size_t i = 0; i < f1p_->ntot_; ++i)
+        {
+            (*f1p_).relem(i) *= (*f1p_).relem(i);
+        }
+        f1p_->FourierTransformForward();
+        //... copy data back
+        unpad(*f1p_, output_op);
+    }
+
     /// @brief convolve two fields
     /// @tparam kfunc1 abstract function type generating data for the first field
     /// @tparam kfunc2 abstract function type generating data for the second field
@@ -512,6 +637,11 @@ public:
     template <typename kfunc1, typename kfunc2, typename opp>
     void convolve2(kfunc1 kf1, kfunc2 kf2, opp output_op)
     {
+        if (f2p_ == nullptr)
+        {
+            f2p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+
         //... prepare data 1
         f1p_->FourierTransformForward(false);
         this->pad_insert(kf1, *f1p_);

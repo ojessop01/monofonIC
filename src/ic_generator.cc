@@ -524,11 +524,13 @@ int run( config_file& the_config )
 
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(2) term" << colors::RESET << std::setw(56) << std::setfill('.') << std::left << "" << std::endl;
-        Conv.convolve_SumOfHessians(phi, {0, 0}, phi, {1, 1}, {2, 2}, op::assign_to(phi2));
-        Conv.convolve_Hessians(phi, {1, 1}, phi, {2, 2}, op::add_to(phi2));
-        Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 1}, op::subtract_from(phi2));
-        Conv.convolve_Hessians(phi, {0, 2}, phi, {0, 2}, op::subtract_from(phi2));
-        Conv.convolve_Hessians(phi, {1, 2}, phi, {1, 2}, op::subtract_from(phi2));
+        Conv.convolve_SumOfHessiansSquare(phi, {0, 0}, {1, 1}, {2, 2}, op::multiply_assign_to(phi2, real_t(0.5)));
+        Conv.convolve_HessianSquare(phi, {0, 0}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {1, 1}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {2, 2}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi2));
+        Conv.convolve_HessianSquare(phi, {0, 2}, op::subtract_from(phi2));
+        Conv.convolve_HessianSquare(phi, {1, 2}, op::subtract_from(phi2));
 
         if (bAddExternalTides)
         {
