@@ -31,6 +31,7 @@ class BaseConvolver
 protected:
     std::array<size_t, 3> np_;
     std::array<real_t, 3> length_;
+    size_t n_ffts_{0};
 
 public:
 
@@ -38,7 +39,7 @@ public:
     /// @param N linear grid size
     /// @param L physical box size
     BaseConvolver(const std::array<size_t, 3> &N, const std::array<real_t, 3> &L)
-        : np_(N), length_(L) {}
+        : np_(N), length_(L), n_ffts_(0) {}
 
 
     /// @brief Construct a new Base Convolver object [deleted copy constructor]  
@@ -46,6 +47,18 @@ public:
     
     /// @brief destructor (virtual)
     virtual ~BaseConvolver() {}
+
+    /// @brief return number of convolver FFTs executed so far
+    size_t get_fft_count() const noexcept { return n_ffts_; }
+
+    /// @brief reset convolver FFT counter
+    void reset_fft_count() noexcept { n_ffts_ = 0; }
+
+    /// @brief implements auto-convolution (squaring) of one Fourier-space field
+    /// @tparam kfunc field
+    /// @tparam opp output operator
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp op) {}
 
     /// @brief implements convolution of two Fourier-space fields
     /// @tparam kfunc1 field 1
@@ -61,6 +74,36 @@ public:
     /// @tparam opp output operator
     template <typename kfunc1, typename kfunc2, typename kfunc3, typename opp>
     void convolve3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, opp op) {}
+
+    /// @brief implements triple convolution where the first two fields are identical (kf12^2 * kf3)
+    /// @tparam kfunc12 repeated inner field
+    /// @tparam kfunc3 outer field
+    /// @tparam opp output operator
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp op) {}
+
+    /// @brief begin accumulating real-space convolution products
+    void begin_accumulate() {}
+
+    /// @brief accumulate weighted square of one field in real space
+    template <typename kfunc>
+    void accumulate_square(kfunc kf, data_t weight = data_t(1.0)) {}
+
+    /// @brief accumulate weighted product of two fields in real space
+    template <typename kfunc1, typename kfunc2>
+    void accumulate2(kfunc1 kf1, kfunc2 kf2, data_t weight = data_t(1.0)) {}
+
+    /// @brief accumulate weighted triple convolution in real space
+    template <typename kfunc1, typename kfunc2, typename kfunc3>
+    void accumulate3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, data_t weight = data_t(1.0)) {}
+
+    /// @brief accumulate weighted triple convolution with squared inner field in real space
+    template <typename kfunc12, typename kfunc3>
+    void accumulate3_square(kfunc12 kf12, kfunc3 kf3, data_t weight = data_t(1.0)) {}
+
+    /// @brief transform accumulated real-space sum forward and write out
+    template <typename opp>
+    void finish_accumulate(opp op) {}
 
 public:
 
@@ -126,6 +169,56 @@ public:
             output_op);
     }
 
+    /// @brief auto-convolve (square) a Hessian field in Fourier space (a_{,ij})^2
+    /// @tparam opp output operator type
+    /// @param in input field a
+    /// @param d2 directions of Hessian (,ij)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_HessianSquare(Grid_FFT<data_t> &in, const std::array<int, 2> &d2, opp output_op)
+    {
+        // transform to FS in case field is not
+        in.FourierTransformForward();
+        // perform auto-convolution of Hessian
+        static_cast<derived_t &>(*this).convolve_square(
+            [&in, &d2](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = in.gradient(d2[0],{i,j,k});
+                auto grad2 = in.gradient(d2[1],{i,j,k});
+                return grad1*grad2*in.kelem(i, j, k);
+            },
+            output_op);
+    }
+
+    /// @brief auto-convolve (square) the sum of three Hessian fields in Fourier space (a_{,ij} + a_{,kl} + a_{,mn})^2
+    /// @tparam opp output operator type
+    /// @param in input field a
+    /// @param d2a directions of first Hessian (,ij)
+    /// @param d2b directions of second Hessian (,kl)
+    /// @param d2c directions of third Hessian (,mn)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_SumOfHessiansSquare(Grid_FFT<data_t> &in,
+                                      const std::array<int, 2> &d2a,
+                                      const std::array<int, 2> &d2b,
+                                      const std::array<int, 2> &d2c,
+                                      opp output_op)
+    {
+        // transform to FS in case field is not
+        in.FourierTransformForward();
+        // perform auto-convolution of sum of three Hessians
+        static_cast<derived_t &>(*this).convolve_square(
+            [&in, &d2a, &d2b, &d2c](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad11 = in.gradient(d2a[0],{i,j,k});
+                auto grad12 = in.gradient(d2a[1],{i,j,k});
+                auto grad21 = in.gradient(d2b[0],{i,j,k});
+                auto grad22 = in.gradient(d2b[1],{i,j,k});
+                auto grad31 = in.gradient(d2c[0],{i,j,k});
+                auto grad32 = in.gradient(d2c[1],{i,j,k});
+                return (grad11*grad12 + grad21*grad22 + grad31*grad32)*in.kelem(i, j, k);
+            },
+            output_op);
+    }
+
     /// @brief convolve two Hessian fields in Fourier space a_{,ij} * b_{,kl}
     /// @tparam opp output operator type
     /// @param inl left input field a
@@ -138,6 +231,11 @@ public:
                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
                            opp output_op)
     {
+        if (&inl == &inr && ((d2l[0] == d2r[0] && d2l[1] == d2r[1]) || (d2l[0] == d2r[1] && d2l[1] == d2r[0])))
+        {
+            convolve_HessianSquare(inl, d2l, output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inr.FourierTransformForward();
@@ -151,6 +249,69 @@ public:
             },
             // second Hessian
             [&inr,&d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            // -> output operator
+            output_op);
+    }
+
+    /// @brief convolve a Fourier-space field with a Hessian field a * b_{,kl}
+    /// @tparam opp output operator type
+    /// @param inl left input field a
+    /// @param inr right input field b
+    /// @param d2r directions of Hessian (,kl)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_Field_and_Hessian(Grid_FFT<data_t> &inl,
+                                    Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                    opp output_op)
+    {
+        // transform to FS in case fields are not
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        // perform convolution of field and Hessian
+        static_cast<derived_t &>(*this).convolve2(
+            // first field
+            [&inl](size_t i, size_t j, size_t k) -> ccomplex_t {
+                return inl.kelem(i, j, k);
+            },
+            // second Hessian
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            // -> output operator
+            output_op);
+    }
+
+    /// @brief convolve squared Hessian field with another Hessian field in Fourier space (a_{,ij})^2 * c_{,mn}
+    /// @tparam opp output operator
+    /// @param inl first input field a (squared)
+    /// @param d2l directions of squared Hessian (,ij)
+    /// @param inr outer input field c
+    /// @param d2r directions of outer Hessian (,mn)
+    /// @param output_op output operator
+    template <typename opp>
+    void convolve_HessianSquare_and_Hessian(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                            opp output_op)
+    {
+        // transform to FS in case fields are not
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        // perform triple convolution with squared inner Hessian
+        static_cast<derived_t &>(*this).convolve3_square(
+            // squared Hessian
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            // outer Hessian
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
                 auto grad1 = inr.gradient(d2r[0],{i,j,k});
                 auto grad2 = inr.gradient(d2r[1],{i,j,k});
                 return grad1*grad2*inr.kelem(i, j, k);
@@ -174,6 +335,11 @@ public:
                            Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
                            opp output_op)
     {
+        if (&inl == &inm && ((d2l[0] == d2m[0] && d2l[1] == d2m[1]) || (d2l[0] == d2m[1] && d2l[1] == d2m[0])))
+        {
+            convolve_HessianSquare_and_Hessian(inl, d2l, inr, d2r, output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inm.FourierTransformForward();
@@ -281,6 +447,14 @@ public:
     template <typename opp> // TOMA
     void multiply_field(Grid_FFT<data_t> &inl, Grid_FFT<data_t> &inr, opp output_op)
     {
+        if (&inl == &inr)
+        {
+            inl.FourierTransformForward();
+            static_cast<derived_t &>(*this).convolve_square(
+                [&inl](size_t i, size_t j, size_t k) -> ccomplex_t { return inl.kelem(i, j, k); },
+                output_op);
+            return;
+        }
         // transform to FS in case fields are not
         inl.FourierTransformForward();
         inr.FourierTransformForward();
@@ -290,6 +464,185 @@ public:
             [&inr](size_t i, size_t j, size_t k) -> ccomplex_t {return  inr.kelem(i, j, k); },
             output_op);
     }
+
+    /// @brief accumulate weighted auto-convolution (square) of a Hessian field (a_{,ij})^2
+    void accumulate_HessianSquare(Grid_FFT<data_t> &in, const std::array<int, 2> &d2, data_t weight = data_t(1.0))
+    {
+        in.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate_square(
+            [&in, &d2](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = in.gradient(d2[0],{i,j,k});
+                auto grad2 = in.gradient(d2[1],{i,j,k});
+                return grad1*grad2*in.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted square of the sum of three Hessian fields (a_{,ij} + a_{,kl} + a_{,mn})^2
+    void accumulate_SumOfHessiansSquare(Grid_FFT<data_t> &in,
+                                        const std::array<int, 2> &d2a,
+                                        const std::array<int, 2> &d2b,
+                                        const std::array<int, 2> &d2c,
+                                        data_t weight = data_t(1.0))
+    {
+        in.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate_square(
+            [&in, &d2a, &d2b, &d2c](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad11 = in.gradient(d2a[0],{i,j,k});
+                auto grad12 = in.gradient(d2a[1],{i,j,k});
+                auto grad21 = in.gradient(d2b[0],{i,j,k});
+                auto grad22 = in.gradient(d2b[1],{i,j,k});
+                auto grad31 = in.gradient(d2c[0],{i,j,k});
+                auto grad32 = in.gradient(d2c[1],{i,j,k});
+                return (grad11*grad12 + grad21*grad22 + grad31*grad32)*in.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted product of two Hessian fields a_{,ij} * b_{,kl}
+    void accumulate_Hessians(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                             Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                             data_t weight = data_t(1.0))
+    {
+        if (&inl == &inr && ((d2l[0] == d2r[0] && d2l[1] == d2r[1]) || (d2l[0] == d2r[1] && d2l[1] == d2r[0])))
+        {
+            accumulate_HessianSquare(inl, d2l, weight);
+            return;
+        }
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate2(
+            [&inl,&d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            [&inr,&d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted product of a Fourier-space field with a Hessian field a * b_{,kl}
+    void accumulate_Field_and_Hessian(Grid_FFT<data_t> &inl,
+                                      Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                      data_t weight = data_t(1.0))
+    {
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate2(
+            [&inl](size_t i, size_t j, size_t k) -> ccomplex_t {
+                return inl.kelem(i, j, k);
+            },
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted triple convolution (a_{,ij})^2 * c_{,mn}
+    void accumulate_HessianSquare_and_Hessian(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                                              Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                                              data_t weight = data_t(1.0))
+    {
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate3_square(
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted triple convolution of three Hessian fields a_{,ij} * b_{,kl} * c_{,mn}
+    void accumulate_Hessians(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                             Grid_FFT<data_t> &inm, const std::array<int, 2> &d2m,
+                             Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r,
+                             data_t weight = data_t(1.0))
+    {
+        if (&inl == &inm && ((d2l[0] == d2m[0] && d2l[1] == d2m[1]) || (d2l[0] == d2m[1] && d2l[1] == d2m[0])))
+        {
+            accumulate_HessianSquare_and_Hessian(inl, d2l, inr, d2r, weight);
+            return;
+        }
+        inl.FourierTransformForward();
+        inm.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate3(
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            [&inm, &d2m](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inm.gradient(d2m[0],{i,j,k});
+                auto grad2 = inm.gradient(d2m[1],{i,j,k});
+                return grad1*grad2*inm.kelem(i, j, k);
+            },
+            [&inr, &d2r](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inr.gradient(d2r[0],{i,j,k});
+                auto grad2 = inr.gradient(d2r[1],{i,j,k});
+                return grad1*grad2*inr.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted product a_{,ij} * (b_{,kl} + b_{,mn})
+    void accumulate_SumOfHessians(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                                  Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r1, const std::array<int, 2> &d2r2,
+                                  data_t weight = data_t(1.0))
+    {
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate2(
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            [&inr, &d2r1, &d2r2](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad11 = inr.gradient(d2r1[0],{i,j,k});
+                auto grad12 = inr.gradient(d2r1[1],{i,j,k});
+                auto grad21 = inr.gradient(d2r2[0],{i,j,k});
+                auto grad22 = inr.gradient(d2r2[1],{i,j,k});
+                return (grad11*grad12+grad21*grad22)*inr.kelem(i, j, k);
+            },
+            weight);
+    }
+
+    /// @brief accumulate weighted product a_{,ij} * (b_{,kl} - b_{,mn})
+    void accumulate_DifferenceOfHessians(Grid_FFT<data_t> &inl, const std::array<int, 2> &d2l,
+                                         Grid_FFT<data_t> &inr, const std::array<int, 2> &d2r1, const std::array<int, 2> &d2r2,
+                                         data_t weight = data_t(1.0))
+    {
+        inl.FourierTransformForward();
+        inr.FourierTransformForward();
+        static_cast<derived_t &>(*this).accumulate2(
+            [&inl, &d2l](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad1 = inl.gradient(d2l[0],{i,j,k});
+                auto grad2 = inl.gradient(d2l[1],{i,j,k});
+                return grad1*grad2*inl.kelem(i, j, k);
+            },
+            [&inr, &d2r1, &d2r2](size_t i, size_t j, size_t k) -> ccomplex_t {
+                auto grad11 = inr.gradient(d2r1[0],{i,j,k});
+                auto grad12 = inr.gradient(d2r1[1],{i,j,k});
+                auto grad21 = inr.gradient(d2r2[0],{i,j,k});
+                auto grad22 = inr.gradient(d2r2[1],{i,j,k});
+                return (grad11*grad12-grad21*grad22)*inr.kelem(i, j, k);
+            },
+            weight);
+    }
 };
 
 //! low-level implementation of convolutions -- naive convolution class, ignoring aliasing (no padding)
@@ -298,13 +651,17 @@ class NaiveConvolver : public BaseConvolver<data_t, NaiveConvolver<data_t>>
 {
 protected:
     /// @brief buffer for Fourier transformed fields
-    Grid_FFT<data_t> *fbuf1_, *fbuf2_;
+    Grid_FFT<data_t> *fbuf1_, *fbuf2_, *facc_;
+    bool acc_active_{false}, acc_has_terms_{false};
 
     /// @brief number of points in each direction
     using BaseConvolver<data_t, NaiveConvolver<data_t>>::np_;
 
     /// @brief length of each direction
     using BaseConvolver<data_t, NaiveConvolver<data_t>>::length_;
+
+    /// @brief FFT counter
+    using BaseConvolver<data_t, NaiveConvolver<data_t>>::n_ffts_;
 
 public:
     /// @brief constructor
@@ -314,7 +671,8 @@ public:
         : BaseConvolver<data_t, NaiveConvolver<data_t>>(N, L)
     {
         fbuf1_ = new Grid_FFT<data_t>(N, length_, true, kspace_id);
-        fbuf2_ = new Grid_FFT<data_t>(N, length_, true, kspace_id);
+        fbuf2_ = nullptr;
+        facc_ = nullptr;
     }
 
     /// @brief destructor
@@ -322,12 +680,44 @@ public:
     {
         delete fbuf1_;
         delete fbuf2_;
+        delete facc_;
+    }
+
+    /// @brief auto-convolution (squaring) of one field
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp output_op)
+    {
+        //... prepare data
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf, *fbuf1_);
+
+        //... square in real space
+        fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            (*fbuf1_).relem(i) *= (*fbuf1_).relem(i);
+        }
+        fbuf1_->FourierTransformForward();
+        ++n_ffts_;
+//... copy data back
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            output_op(i, (*fbuf1_)[i]);
+        }
     }
 
     /// @brief convolution of two fields
     template <typename kfunc1, typename kfunc2, typename opp>
     void convolve2(kfunc1 kf1, kfunc2 kf2, opp output_op)
     {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
         //... prepare data 1
         fbuf1_->FourierTransformForward(false);
         this->copy_in(kf1, *fbuf1_);
@@ -339,6 +729,7 @@ public:
         //... convolve
         fbuf1_->FourierTransformBackward();
         fbuf2_->FourierTransformBackward();
+        n_ffts_ += 2;
 
 #pragma omp parallel for
         for (size_t i = 0; i < fbuf1_->ntot_; ++i)
@@ -346,6 +737,7 @@ public:
             (*fbuf2_).relem(i) *= (*fbuf1_).relem(i);
         }
         fbuf2_->FourierTransformForward();
+        ++n_ffts_;
         // fbuf2_->dealias();
 //... copy data back
 #pragma omp parallel for
@@ -361,6 +753,10 @@ public:
     template <typename kfunc1, typename kfunc2, typename kfunc3, typename opp>
     void convolve3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, opp output_op)
     {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
         //... prepare data 1
         fbuf1_->FourierTransformForward(false);
         this->copy_in(kf1, *fbuf1_);
@@ -372,6 +768,7 @@ public:
         //... convolve
         fbuf1_->FourierTransformBackward();
         fbuf2_->FourierTransformBackward();
+        n_ffts_ += 2;
 
 #pragma omp parallel for
         for (size_t i = 0; i < fbuf1_->ntot_; ++i)
@@ -385,6 +782,7 @@ public:
 
         //... convolve
         fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
 
 #pragma omp parallel for
         for (size_t i = 0; i < fbuf1_->ntot_; ++i)
@@ -393,12 +791,245 @@ public:
         }
 
         fbuf2_->FourierTransformForward();
+        ++n_ffts_;
 //... copy data back
 #pragma omp parallel for
         for (size_t i = 0; i < fbuf2_->ntot_; ++i)
         {
             output_op(i, (*fbuf2_)[i]);
         }
+    }
+
+    /// @brief triple convolution where the first two fields are identical
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp output_op)
+    {
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+        //... prepare and square inner field
+        fbuf2_->FourierTransformForward(false);
+        this->copy_in(kf12, *fbuf2_);
+        fbuf2_->FourierTransformBackward();
+        ++n_ffts_;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf2_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf2_).relem(i);
+        }
+
+        //... prepare outer field
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf3, *fbuf1_);
+        fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf1_).relem(i);
+        }
+
+        fbuf2_->FourierTransformForward();
+        ++n_ffts_;
+//... copy data back
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf2_->ntot_; ++i)
+        {
+            output_op(i, (*fbuf2_)[i]);
+        }
+    }
+
+    /// @brief begin accumulating real-space products
+    void begin_accumulate()
+    {
+        if (facc_ == nullptr)
+        {
+            facc_ = new Grid_FFT<data_t>(np_, length_, true, rspace_id);
+        }
+        facc_->FourierTransformBackward(false);
+        acc_active_ = true;
+        acc_has_terms_ = false;
+    }
+
+    /// @brief accumulate weighted square of one field in real space
+    template <typename kfunc>
+    void accumulate_square(kfunc kf, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf, *fbuf1_);
+        fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) = weight * (*fbuf1_).relem(i) * (*fbuf1_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) += weight * (*fbuf1_).relem(i) * (*fbuf1_).relem(i);
+            }
+        }
+    }
+
+    /// @brief accumulate weighted product of two fields in real space
+    template <typename kfunc1, typename kfunc2>
+    void accumulate2(kfunc1 kf1, kfunc2 kf2, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf1, *fbuf1_);
+        fbuf2_->FourierTransformForward(false);
+        this->copy_in(kf2, *fbuf2_);
+
+        fbuf1_->FourierTransformBackward();
+        fbuf2_->FourierTransformBackward();
+        n_ffts_ += 2;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) = weight * (*fbuf1_).relem(i) * (*fbuf2_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) += weight * (*fbuf1_).relem(i) * (*fbuf2_).relem(i);
+            }
+        }
+    }
+
+    /// @brief accumulate weighted triple product in real space
+    template <typename kfunc1, typename kfunc2, typename kfunc3>
+    void accumulate3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf1, *fbuf1_);
+        fbuf2_->FourierTransformForward(false);
+        this->copy_in(kf2, *fbuf2_);
+
+        fbuf1_->FourierTransformBackward();
+        fbuf2_->FourierTransformBackward();
+        n_ffts_ += 2;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf1_).relem(i);
+        }
+
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf3, *fbuf1_);
+        fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) = weight * (*fbuf2_).relem(i) * (*fbuf1_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) += weight * (*fbuf2_).relem(i) * (*fbuf1_).relem(i);
+            }
+        }
+    }
+
+    /// @brief accumulate weighted triple product with squared inner field in real space
+    template <typename kfunc12, typename kfunc3>
+    void accumulate3_square(kfunc12 kf12, kfunc3 kf3, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        if (fbuf2_ == nullptr)
+        {
+            fbuf2_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+        fbuf2_->FourierTransformForward(false);
+        this->copy_in(kf12, *fbuf2_);
+        fbuf2_->FourierTransformBackward();
+        ++n_ffts_;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < fbuf2_->ntot_; ++i)
+        {
+            (*fbuf2_).relem(i) *= (*fbuf2_).relem(i);
+        }
+
+        fbuf1_->FourierTransformForward(false);
+        this->copy_in(kf3, *fbuf1_);
+        fbuf1_->FourierTransformBackward();
+        ++n_ffts_;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) = weight * (*fbuf2_).relem(i) * (*fbuf1_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < fbuf1_->ntot_; ++i)
+            {
+                (*facc_).relem(i) += weight * (*fbuf2_).relem(i) * (*fbuf1_).relem(i);
+            }
+        }
+    }
+
+    /// @brief transform accumulated real-space sum forward and write out
+    template <typename opp>
+    void finish_accumulate(opp output_op)
+    {
+        assert(acc_active_);
+        if (!acc_has_terms_)
+        {
+            facc_->zero();
+        }
+        facc_->FourierTransformForward();
+        ++n_ffts_;
+#pragma omp parallel for
+        for (size_t i = 0; i < facc_->ntot_; ++i)
+        {
+            output_op(i, (*facc_)[i]);
+        }
+        acc_active_ = false;
+        acc_has_terms_ = false;
     }
 
 //--------------------------------------------------------------------------------------------------------
@@ -431,10 +1062,12 @@ class OrszagConvolver : public BaseConvolver<data_t, OrszagConvolver<data_t>>
 {
 private:
     /// @brief buffer for Fourier transformed fields
-    Grid_FFT<data_t> *f1p_, *f2p_, *fbuf_;
+    Grid_FFT<data_t> *f1p_, *f2p_, *faccp_, *fbuf_;
+    bool acc_active_{false}, acc_has_terms_{false};
 
     using BaseConvolver<data_t, OrszagConvolver<data_t>>::np_;
     using BaseConvolver<data_t, OrszagConvolver<data_t>>::length_;
+    using BaseConvolver<data_t, OrszagConvolver<data_t>>::n_ffts_;
 
     ccomplex_t *crecvbuf_; //!< receive buffer for MPI (complex)
     real_t *recvbuf_;     //!< receive buffer for MPI (real)
@@ -465,7 +1098,8 @@ public:
     {
         //... create temporaries
         f1p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
-        f2p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        f2p_ = nullptr; // allocated lazily only if a two-field product is requested
+        faccp_ = nullptr; // allocated lazily only if real-space accumulation is requested
         fbuf_ = new Grid_FFT<data_t>(N, length_, true, kspace_id); // needed for MPI, or for triple conv.
 
 #if defined(USE_MPI)
@@ -499,10 +1133,36 @@ public:
     {
         delete f1p_;
         delete f2p_;
+        delete faccp_;
         delete fbuf_;
 #if defined(USE_MPI)
         delete[] crecvbuf_;
 #endif
+    }
+
+    /// @brief auto-convolve (square) one field using a single padded buffer
+    /// @tparam kfunc abstract function type generating data for the field
+    /// @tparam opp abstract function type for the output operation
+    template <typename kfunc, typename opp>
+    void convolve_square(kfunc kf, opp output_op)
+    {
+        //... prepare data
+        f1p_->FourierTransformForward(false);
+        this->pad_insert(kf, *f1p_);
+
+        //... square in real space
+        f1p_->FourierTransformBackward();
+        ++n_ffts_;
+
+#pragma omp parallel for
+        for (size_t i = 0; i < f1p_->ntot_; ++i)
+        {
+            (*f1p_).relem(i) *= (*f1p_).relem(i);
+        }
+        f1p_->FourierTransformForward();
+        ++n_ffts_;
+        //... copy data back
+        unpad(*f1p_, output_op);
     }
 
     /// @brief convolve two fields
@@ -512,6 +1172,11 @@ public:
     template <typename kfunc1, typename kfunc2, typename opp>
     void convolve2(kfunc1 kf1, kfunc2 kf2, opp output_op)
     {
+        if (f2p_ == nullptr)
+        {
+            f2p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+
         //... prepare data 1
         f1p_->FourierTransformForward(false);
         this->pad_insert(kf1, *f1p_);
@@ -523,6 +1188,7 @@ public:
         //... convolve
         f1p_->FourierTransformBackward();
         f2p_->FourierTransformBackward();
+        n_ffts_ += 2;
 
 #pragma omp parallel for
         for (size_t i = 0; i < f1p_->ntot_; ++i)
@@ -530,6 +1196,7 @@ public:
             (*f2p_).relem(i) *= (*f1p_).relem(i);
         }
         f2p_->FourierTransformForward();
+        ++n_ffts_;
         //... copy data back
         unpad(*f2p_, output_op);
     }
@@ -546,6 +1213,137 @@ public:
         fbuf_->FourierTransformForward(false);
         convolve2(kf1, kf2, assign_to(*fbuf_));
         convolve2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, output_op);
+    }
+
+    /// @brief convolve squared field with outer field (kf12^2 * kf3)
+    /// @tparam kfunc12 abstract function type generating data for the squared inner field
+    /// @tparam kfunc3 abstract function type generating data for the outer field
+    /// @tparam opp abstract function type for the output operation
+    template <typename kfunc12, typename kfunc3, typename opp>
+    void convolve3_square(kfunc12 kf12, kfunc3 kf3, opp output_op)
+    {
+        auto assign_to = [](auto &g) { return [&](auto i, auto v) { g[i] = v; }; };
+        fbuf_->FourierTransformForward(false);
+        convolve_square(kf12, assign_to(*fbuf_));
+        convolve2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, output_op);
+    }
+
+    /// @brief begin accumulating real-space products on the padded grid
+    void begin_accumulate()
+    {
+        if (faccp_ == nullptr)
+        {
+            faccp_ = new Grid_FFT<data_t>(np_, length_, true, rspace_id);
+        }
+        faccp_->FourierTransformBackward(false);
+        acc_active_ = true;
+        acc_has_terms_ = false;
+    }
+
+    /// @brief accumulate weighted square of one field on the padded real-space grid
+    template <typename kfunc>
+    void accumulate_square(kfunc kf, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        f1p_->FourierTransformForward(false);
+        this->pad_insert(kf, *f1p_);
+        f1p_->FourierTransformBackward();
+        ++n_ffts_;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < f1p_->ntot_; ++i)
+            {
+                (*faccp_).relem(i) = weight * (*f1p_).relem(i) * (*f1p_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < f1p_->ntot_; ++i)
+            {
+                (*faccp_).relem(i) += weight * (*f1p_).relem(i) * (*f1p_).relem(i);
+            }
+        }
+    }
+
+    /// @brief accumulate weighted product of two fields on the padded real-space grid
+    template <typename kfunc1, typename kfunc2>
+    void accumulate2(kfunc1 kf1, kfunc2 kf2, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        if (f2p_ == nullptr)
+        {
+            f2p_ = new Grid_FFT<data_t>(np_, length_, true, kspace_id);
+        }
+
+        f1p_->FourierTransformForward(false);
+        this->pad_insert(kf1, *f1p_);
+
+        f2p_->FourierTransformForward(false);
+        this->pad_insert(kf2, *f2p_);
+
+        f1p_->FourierTransformBackward();
+        f2p_->FourierTransformBackward();
+        n_ffts_ += 2;
+
+        if (!acc_has_terms_)
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < f1p_->ntot_; ++i)
+            {
+                (*faccp_).relem(i) = weight * (*f1p_).relem(i) * (*f2p_).relem(i);
+            }
+            acc_has_terms_ = true;
+        }
+        else
+        {
+#pragma omp parallel for
+            for (size_t i = 0; i < f1p_->ntot_; ++i)
+            {
+                (*faccp_).relem(i) += weight * (*f1p_).relem(i) * (*f2p_).relem(i);
+            }
+        }
+    }
+
+    /// @brief accumulate weighted dealiased triple product on the padded real-space grid
+    template <typename kfunc1, typename kfunc2, typename kfunc3>
+    void accumulate3(kfunc1 kf1, kfunc2 kf2, kfunc3 kf3, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        auto assign_to = [](auto &g) { return [&](auto i, auto v) { g[i] = v; }; };
+        fbuf_->FourierTransformForward(false);
+        convolve2(kf1, kf2, assign_to(*fbuf_));
+        accumulate2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, weight);
+    }
+
+    /// @brief accumulate weighted dealiased triple product with squared inner field on the padded real-space grid
+    template <typename kfunc12, typename kfunc3>
+    void accumulate3_square(kfunc12 kf12, kfunc3 kf3, data_t weight = data_t(1.0))
+    {
+        assert(acc_active_);
+        auto assign_to = [](auto &g) { return [&](auto i, auto v) { g[i] = v; }; };
+        fbuf_->FourierTransformForward(false);
+        convolve_square(kf12, assign_to(*fbuf_));
+        accumulate2([&](size_t i, size_t j, size_t k) -> ccomplex_t { return fbuf_->kelem(i, j, k); }, kf3, weight);
+    }
+
+    /// @brief transform accumulated padded real-space sum forward and unpad to output
+    template <typename opp>
+    void finish_accumulate(opp output_op)
+    {
+        assert(acc_active_);
+        if (!acc_has_terms_)
+        {
+            faccp_->zero();
+        }
+        faccp_->FourierTransformForward();
+        ++n_ffts_;
+        unpad(*faccp_, output_op);
+        acc_active_ = false;
+        acc_has_terms_ = false;
     }
 
     // template< typename opp >
