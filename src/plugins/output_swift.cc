@@ -213,7 +213,7 @@ public:
 
     // Output options
     blongids_ = cf_.get_value_safe<bool>("output", "UseLongids", true);
-    bdobaryons_ = cf_.get_value<bool>("setup", "DoBaryons");
+    bdobaryons_ = cf_.get_value_safe<bool>("setup", "DoBaryons", false);
 
     // SWIFT top-level cell grid
     cdim_ = cf_.get_value_safe<size_t>("output", "top_level_cells", 32);
@@ -1240,16 +1240,16 @@ protected:
   void write_ics_metadata() const {
 
     // Read the main choices from the configuration
-    int order = cf_.get_value<int>("setup", "LPTorder");
-    std::string load = cf_.get_value<std::string>("setup", "ParticleLoad");
+    int order = cf_.get_value_safe<int>("setup", "LPTorder", 100);
+    std::string load = cf_.get_value_safe<std::string>("setup", "ParticleLoad", "sc");
     std::string tf = cf_.get_value<std::string>("cosmology", "transfer");
     std::string cosmo_set =
-        cf_.get_value<std::string>("cosmology", "ParameterSet");
+        cf_.get_value_safe<std::string>("cosmology", "ParameterSet", "none");
     std::string rng = cf_.get_value<std::string>("random", "generator");
-    int do_fixing = cf_.get_value<bool>("setup", "DoFixing");
-    int do_invert = cf_.get_value<bool>("setup", "DoInversion");
-    int do_baryons = cf_.get_value<bool>("setup", "DoBaryons");
-    int do_baryonsVrel = cf_.get_value<bool>("setup", "DoBaryonVrel");
+    int do_fixing = cf_.get_value_safe<bool>("setup", "DoFixing", false);
+    int do_invert = cf_.get_value_safe<bool>("setup", "DoInversion", false);
+    int do_baryons = cf_.get_value_safe<bool>("setup", "DoBaryons", false);
+    int do_baryonsVrel = cf_.get_value_safe<bool>("setup", "DoBaryonVrel", false);
     int L = cf_.get_value<int>("setup", "GridRes");
 
     // Write them as a summary, as attributes of the group itself

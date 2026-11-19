@@ -134,15 +134,15 @@ public:
     HDFCreateFile(this_fname_);
 
     // Write MUSIC configuration header
-    int order = cf_.get_value<int>("setup", "LPTorder");
-    std::string load = cf_.get_value<std::string>("setup", "ParticleLoad");
+    int order = cf_.get_value_safe<int>("setup", "LPTorder", 100);
+    std::string load = cf_.get_value_safe<std::string>("setup", "ParticleLoad", "sc");
     std::string tf = cf_.get_value<std::string>("cosmology", "transfer");
-    std::string cosmo_set = cf_.get_value<std::string>("cosmology", "ParameterSet");
+    std::string cosmo_set = cf_.get_value_safe<std::string>("cosmology", "ParameterSet", "none");
     std::string rng = cf_.get_value<std::string>("random", "generator");
-    int do_fixing = cf_.get_value<bool>("setup", "DoFixing");
-    int do_invert = cf_.get_value<bool>("setup", "DoInversion");
-    int do_baryons = cf_.get_value<bool>("setup", "DoBaryons");
-    int do_baryonsVrel = cf_.get_value<bool>("setup", "DoBaryonVrel");
+    int do_fixing = cf_.get_value_safe<bool>("setup", "DoFixing", false);
+    int do_invert = cf_.get_value_safe<bool>("setup", "DoInversion", false);
+    int do_baryons = cf_.get_value_safe<bool>("setup", "DoBaryons", false);
+    int do_baryonsVrel = cf_.get_value_safe<bool>("setup", "DoBaryonVrel", false);
     int L = cf_.get_value<int>("setup", "GridRes");
 
     HDFCreateGroup(this_fname_, "ICs_parameters");

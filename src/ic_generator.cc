@@ -396,7 +396,7 @@ int run( config_file& the_config )
     std::array<Grid_FFT<real_t> *, 3> A3({&A3x, &A3y, &A3z});
 
     // temporary storage of additional data
-    Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+    Grid_FFT<real_t> tmp({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen}, false); // do not allocate until needed at output
 
     analytical::PlaneWaveState plane_wave_state;
 
@@ -490,16 +490,6 @@ int run( config_file& the_config )
     //--------------------------------------------------------------------
 
     //--------------------------------------------------------------------
-    // Create convolution class instance for non-linear terms
-    //--------------------------------------------------------------------
-#if defined(USE_CONVOLVER_ORSZAG)
-    OrszagConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
-#elif defined(USE_CONVOLVER_NAIVE)
-    NaiveConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
-#endif
-    //--------------------------------------------------------------------
-
-    //--------------------------------------------------------------------
     // Create PLT gradient operator
     //--------------------------------------------------------------------
 #if defined(ENABLE_PLT)
@@ -513,6 +503,32 @@ int run( config_file& the_config )
     species_list.push_back(cosmo_species::dm);
     if (bDoBaryons)
         species_list.push_back(cosmo_species::baryon);
+
+    bool bAnyEulerian = false;
+    bool bAnyLagrangianField = false;
+    bool bAnyParticlesOrLagrangian = false;
+    for (const auto &sp : species_list)
+    {
+        const auto otype = the_output_plugin->write_species_as(sp);
+        if (otype == output_type::field_eulerian)
+            bAnyEulerian = true;
+        if (otype == output_type::field_lagrangian)
+            bAnyLagrangianField = true;
+        if (otype == output_type::particles || otype == output_type::field_lagrangian)
+            bAnyParticlesOrLagrangian = true;
+    }
+
+    // scope convolver so its buffers are freed before the output stage
+    {
+    //--------------------------------------------------------------------
+    // Create convolution class instance for non-linear terms
+    //--------------------------------------------------------------------
+#if defined(USE_CONVOLVER_ORSZAG)
+    OrszagConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+#elif defined(USE_CONVOLVER_NAIVE)
+    NaiveConvolver<real_t> Conv({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
+#endif
+    //--------------------------------------------------------------------
 
     //======================================================================
     //... compute 1LPT displacement potential ....
@@ -602,6 +618,10 @@ int run( config_file& the_config )
         }, wnoise);
     }
     phi.zero_DC_mode();
+    if (!bDoBaryons && !bAnyEulerian)
+    {
+        wnoise.reset();
+    }
 
     analytical::configure_plane_wave(the_config, boxlen, g1, phi, plane_wave_state);
 
@@ -617,11 +637,13 @@ int run( config_file& the_config )
 
         wtime = get_wtime();
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(2) term" << colors::RESET << std::setw(56) << std::setfill('.') << std::left << "" << std::endl;
-        Conv.convolve_SumOfHessians(phi, {0, 0}, phi, {1, 1}, {2, 2}, op::assign_to(phi2));
-        Conv.convolve_Hessians(phi, {1, 1}, phi, {2, 2}, op::add_to(phi2));
-        Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 1}, op::subtract_from(phi2));
-        Conv.convolve_Hessians(phi, {0, 2}, phi, {0, 2}, op::subtract_from(phi2));
-        Conv.convolve_Hessians(phi, {1, 2}, phi, {1, 2}, op::subtract_from(phi2));
+        Conv.convolve_SumOfHessiansSquare(phi, {0, 0}, {1, 1}, {2, 2}, op::multiply_assign_to(phi2, real_t(0.5)));
+        Conv.convolve_HessianSquare(phi, {0, 0}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {1, 1}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {2, 2}, op::multiply_add_to(phi2, real_t(-0.5)));
+        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi2));
+        Conv.convolve_HessianSquare(phi, {0, 2}, op::subtract_from(phi2));
+        Conv.convolve_HessianSquare(phi, {1, 2}, op::subtract_from(phi2));
 
         if (bAddExternalTides)
         {
@@ -658,11 +680,12 @@ int run( config_file& the_config )
         music::ilog << colors::SYM_CHECK << " " << colors::TASK_NAME << "Computing phi(3a) term" << colors::RESET << std::setw(55) << std::setfill('.') << std::left << "" << std::endl;
         phi3a.allocate();
         phi3a.FourierTransformForward(false);
-        Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, phi, {2, 2}, op::assign_to(phi3a));
+        Conv.convolve_Hessians(phi, {0, 0}, phi, {1, 1}, op::assign_to(phi3a));
+        Conv.convolve_HessianSquare(phi, {0, 1}, op::subtract_from(phi3a));
+        Conv.convolve_Field_and_Hessian(phi3a, phi, {2, 2}, op::assign_to(phi3a));
         Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 2}, phi, {1, 2}, op::multiply_add_to(phi3a,2.0));
-        Conv.convolve_Hessians(phi, {1, 2}, phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
-        Conv.convolve_Hessians(phi, {0, 2}, phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
-        Conv.convolve_Hessians(phi, {0, 1}, phi, {0, 1}, phi, {2, 2}, op::subtract_from(phi3a));
+        Conv.convolve_HessianSquare_and_Hessian(phi, {1, 2}, phi, {0, 0}, op::subtract_from(phi3a));
+        Conv.convolve_HessianSquare_and_Hessian(phi, {0, 2}, phi, {1, 1}, op::subtract_from(phi3a));
         phi3a.apply_InverseLaplacian();
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
 
@@ -698,6 +721,7 @@ int run( config_file& the_config )
         }
         music::ilog << std::setw(70) << std::setfill(' ') << std::right << "took : " << std::setw(8) << get_wtime() - wtime << "s" << std::endl;
     }
+    } // end convolver scope
 
     ///... scale all potentials with respective growth factors
     phi *= g1;
@@ -724,6 +748,69 @@ int run( config_file& the_config )
                     << ", g3a=" << g3a
                     << ", g3b=" << g3b
                     << ", g3c=" << g3c << std::endl;
+    }
+
+    // Combine 3LPT scalar potentials when downstream uses do not need all 4 fields separately
+    bool bCombinedPotentialsParticles = false;
+    bool bCombinedPotentialsLagrangian = false;
+    if (LPTorder > 2)
+    {
+        if (!bAnyParticlesOrLagrangian)
+        {
+            phi3a.reset();
+            phi3b.reset();
+            A3[0]->reset();
+            A3[1]->reset();
+            A3[2]->reset();
+        }
+        else if (!bAnyEulerian && !plane_wave_state.context.enabled)
+        {
+            phi.FourierTransformForward();
+            phi2.FourierTransformForward();
+            phi3a.FourierTransformForward();
+            phi3b.FourierTransformForward();
+            if (!bAnyLagrangianField)
+            {
+                // Particle output needs only position sum (stored in phi2) and velocity sum (stored in phi)
+                #pragma omp parallel for
+                for (size_t i = 0; i < phi.size(0); ++i) {
+                    for (size_t j = 0; j < phi.size(1); ++j) {
+                        for (size_t k = 0; k < phi.size(2); ++k) {
+                            const size_t idx = phi.get_idx(i, j, k);
+                            const auto p1  = phi.kelem(idx);
+                            const auto p2  = phi2.kelem(idx);
+                            const auto p3a = phi3a.kelem(idx);
+                            const auto p3b = phi3b.kelem(idx);
+                            phi2.kelem(idx) = ((p1 + p2) + p3a) + p3b;
+                            phi.kelem(idx)  = (vfac1 * p1 + vfac2 * p2) + (vfac3a * p3a + vfac3b * p3b);
+                        }
+                    }
+                }
+                phi3a.reset();
+                phi3b.reset();
+                bCombinedPotentialsParticles = true;
+            }
+            else
+            {
+                // Lagrangian field output also needs 1st-order phi for SPT density: keep phi, combine into phi2 and phi3a
+                #pragma omp parallel for
+                for (size_t i = 0; i < phi.size(0); ++i) {
+                    for (size_t j = 0; j < phi.size(1); ++j) {
+                        for (size_t k = 0; k < phi.size(2); ++k) {
+                            const size_t idx = phi.get_idx(i, j, k);
+                            const auto p1  = phi.kelem(idx);
+                            const auto p2  = phi2.kelem(idx);
+                            const auto p3a = phi3a.kelem(idx);
+                            const auto p3b = phi3b.kelem(idx);
+                            phi2.kelem(idx)  = ((p1 + p2) + p3a) + p3b;
+                            phi3a.kelem(idx) = (vfac1 * p1 + vfac2 * p2) + (vfac3a * p3a + vfac3b * p3b);
+                        }
+                    }
+                }
+                phi3b.reset();
+                bCombinedPotentialsLagrangian = true;
+            }
+        }
     }
 
     music::ilog << music::HRULE << std::endl;
@@ -756,8 +843,10 @@ int run( config_file& the_config )
     //==============================================================//
     // main output loop, loop over all species that are enabled
     //==============================================================//
-    for( const auto& this_species : species_list )
+    for( size_t isp = 0; isp < species_list.size(); ++isp )
     {
+        const auto& this_species = species_list[isp];
+        const bool bLastSpecies = (isp + 1 == species_list.size());
         music::ilog << std::endl
                     << colors::BOLD << colors::HEADER << colors::SYM_DIAMOND << " Computing ICs for species " << colors::SYM_ATOM << " " << colors::SPECIES << cosmo_species_name[this_species] << colors::RESET << std::endl << std::endl;
 
@@ -783,6 +872,8 @@ int run( config_file& the_config )
                 bool secondary_lattice = (this_species == cosmo_species::baryon &&
                                         the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
 
+                if( !tmp.is_allocated() ) tmp.allocate();
+
                 particle_lattice_generator_ptr = 
                 std::make_unique<particle::lattice_generator<Grid_FFT<real_t>>>( lattice_type, secondary_lattice, the_output_plugin->has_64bit_reals(), the_output_plugin->has_64bit_ids(), 
                     bDoBaryons, IDoffset, tmp, the_config );
@@ -807,6 +898,9 @@ int run( config_file& the_config )
                 rho.assign_function_of_grids_kdep( [&]( auto k, auto wn ){
                     return wn * the_cosmo_calc->get_amplitude_delta_bc(k.norm(),bDoLinearBCcorr);
                 }, wnoise );
+                if( bLastSpecies && !bDoLinearBCcorr ){
+                    wnoise.reset();
+                }
                 rho.zero_DC_mode();
                 rho.FourierTransformBackward();
 
@@ -838,6 +932,9 @@ int run( config_file& the_config )
                 rho.assign_function_of_grids_kdep( [&]( auto k, auto wn ){
                     return wn * the_cosmo_calc->get_amplitude_delta_bc(k.norm(), false);
                 }, wnoise );
+                if( bLastSpecies ){
+                    wnoise.reset();
+                }
                 rho.zero_DC_mode();
                 rho.FourierTransformBackward();
                 
@@ -888,6 +985,9 @@ int run( config_file& the_config )
                         return prho * std::exp(ccomplex_t(0.0,1.0/hbar) * (pphi + pphi2) / Dplus0);
                     }, phi, phi2, rho );
                 }
+                if( bLastSpecies ){
+                    phi.reset();
+                }
 
                 //======================================================================
                 // evolve wave-function (one drift step) psi = psi *exp(-i hbar *k^2 dt / 2)
@@ -903,6 +1003,9 @@ int run( config_file& the_config )
                     psi.assign_function_of_grids_r([&](auto ppsi, auto pphi2) {
                         return ppsi * std::exp(ccomplex_t(0.0,1.0/hbar) * (pphi2) / Dplus0);
                     }, psi, phi2);
+                    if( bLastSpecies ){
+                        phi2.reset();
+                    }
                 }
 
                 //======================================================================
@@ -922,6 +1025,7 @@ int run( config_file& the_config )
                 //======================================================================
                 Grid_FFT<ccomplex_t> grad_psi({ngrid, ngrid, ngrid}, {boxlen, boxlen, boxlen});
                 const real_t vunit = Dplus0 * vfac1 / boxlen * the_output_plugin->velocity_unit();
+                if( !tmp.is_allocated() ) tmp.allocate();
                 for( int idim=0; idim<3; ++idim )
                 {
                     grad_psi.FourierTransformBackward(false);
@@ -940,6 +1044,9 @@ int run( config_file& the_config )
                     fluid_component fc = (idim==0)? fluid_component::vx : ((idim==1)? fluid_component::vy : fluid_component::vz );
                     the_output_plugin->write_grid_data( tmp, this_species, fc );
                 }
+                if( bLastSpecies ){
+                    tmp.reset();
+                }
             }
 
             if( the_output_plugin->write_species_as( this_species ) == output_type::particles 
@@ -953,6 +1060,7 @@ int run( config_file& the_config )
                 bool shifted_lattice = (this_species == cosmo_species::baryon &&
                                         the_output_plugin->write_species_as(this_species) == output_type::particles) ? true : false;
 
+                if( !tmp.is_allocated() ) tmp.allocate();
                 
                 // The interpolator is only needed for the glass compensation kernel.
                 // Building it allocates and exchanges ghost slabs, so skip it for
@@ -962,18 +1070,18 @@ int run( config_file& the_config )
                     interp = std::make_unique<grid_interpolate<1,Grid_FFT<real_t>>>( tmp );
                 }
 
-                phi.FourierTransformForward();
-                if( LPTorder > 1 ){
+                if( phi.is_allocated() ) phi.FourierTransformForward();
+                if( LPTorder > 1 && phi2.is_allocated() ){
                     phi2.FourierTransformForward();
                 }
                 if( LPTorder > 2 ){
-                    phi3a.FourierTransformForward();
-                    phi3b.FourierTransformForward();
-                    A3[0]->FourierTransformForward();
-                    A3[1]->FourierTransformForward();
-                    A3[2]->FourierTransformForward();
+                    if( phi3a.is_allocated() ) phi3a.FourierTransformForward();
+                    if( phi3b.is_allocated() ) phi3b.FourierTransformForward();
+                    if( A3[0]->is_allocated() ) A3[0]->FourierTransformForward();
+                    if( A3[1]->is_allocated() ) A3[1]->FourierTransformForward();
+                    if( A3[2]->is_allocated() ) A3[2]->FourierTransformForward();
                 }
-                wnoise.FourierTransformForward();
+                if( wnoise.is_allocated() ) wnoise.FourierTransformForward();
                 analytical::dump_plane_wave_gradients(
                     the_config,
                     plane_wave_state,
@@ -1002,15 +1110,20 @@ int run( config_file& the_config )
                         for (size_t j = 0; j < phi.size(1); ++j) {
                             for (size_t k = 0; k < phi.size(2); ++k) {
                                 size_t idx = phi.get_idx(i,j,k);
-                                auto phitot = phi.kelem(idx);
+                                ccomplex_t phitot;
+                                if( bCombinedPotentialsParticles || bCombinedPotentialsLagrangian ){
+                                    phitot = phi2.kelem(idx);
+                                }else{
+                                    phitot = phi.kelem(idx);
 
-                                if( LPTorder > 1 ){
-                                    phitot += phi2.kelem(idx);
-                                }
+                                    if( LPTorder > 1 ){
+                                        phitot += phi2.kelem(idx);
+                                    }
 
-                                if( LPTorder > 2 ){
-                                    phitot += phi3a.kelem(idx);
-                                    phitot += phi3b.kelem(idx);
+                                    if( LPTorder > 2 ){
+                                        phitot += phi3a.kelem(idx);
+                                        phitot += phi3b.kelem(idx);
+                                    }
                                 }
 
                                 tmp.kelem(idx) = lg.gradient(idim,tmp.get_k3(i,j,k)) * phitot;
@@ -1044,6 +1157,9 @@ int run( config_file& the_config )
                         the_output_plugin->write_grid_data( tmp, this_species, fc );
                     }
                 }
+                if( bLastSpecies && (bCombinedPotentialsParticles || bCombinedPotentialsLagrangian) ){
+                    phi2.reset();
+                }
 
                 // write out velocities
                 for( int idim=0; idim<3; ++idim ){
@@ -1059,14 +1175,21 @@ int run( config_file& the_config )
                             for (size_t k = 0; k < phi.size(2); ++k) {
                                 size_t idx = phi.get_idx(i,j,k);
                                 
-                                auto phitot_v = vfac1 * phi.kelem(idx);
-                                
-                                if( LPTorder > 1 ){
-                                    phitot_v += vfac2 * phi2.kelem(idx);
-                                }
+                                ccomplex_t phitot_v;
+                                if( bCombinedPotentialsParticles ){
+                                    phitot_v = phi.kelem(idx);
+                                }else if( bCombinedPotentialsLagrangian ){
+                                    phitot_v = phi3a.kelem(idx);
+                                }else{
+                                    phitot_v = vfac1 * phi.kelem(idx);
+                                    
+                                    if( LPTorder > 1 ){
+                                        phitot_v += vfac2 * phi2.kelem(idx);
+                                    }
 
-                                if( LPTorder > 2 ){
-                                    phitot_v += vfac3a * phi3a.kelem(idx) + vfac3b * phi3b.kelem(idx);
+                                    if( LPTorder > 2 ){
+                                        phitot_v += vfac3a * phi3a.kelem(idx) + vfac3b * phi3b.kelem(idx);
+                                    }
                                 }
                                 
                                 tmp.kelem(idx) = lg.gradient(idim,tmp.get_k3(i,j,k)) * phitot_v;
@@ -1114,9 +1237,22 @@ int run( config_file& the_config )
                         the_output_plugin->write_grid_data( tmp, this_species, fc );
                     }
                 }
+                if( bLastSpecies ){
+                    phi2.reset();
+                    phi3a.reset();
+                    phi3b.reset();
+                    A3[0]->reset();
+                    A3[1]->reset();
+                    A3[2]->reset();
+                    wnoise.reset();
+                }
 
                 if( the_output_plugin->write_species_as( this_species ) == output_type::particles )
                 {
+                    if( bLastSpecies ){
+                        phi.reset();
+                        tmp.reset();
+                    }
                     the_output_plugin->write_particle_data( particle_lattice_generator_ptr->get_particles(), this_species, Omega[this_species] );
                 }
                 
@@ -1128,9 +1264,15 @@ int run( config_file& the_config )
                     tmp.assign_function_of_grids_kdep( []( auto kvec, auto pphi ){
                         return kvec.norm_squared() *  pphi;
                     }, phi);
+                    if( bLastSpecies ){
+                        phi.reset();
+                    }
                     tmp.Write_PowerSpectrum("input_powerspec_sampled_SPT.txt");
                     tmp.FourierTransformBackward();
                     the_output_plugin->write_grid_data( tmp, this_species, fluid_component::density );
+                    if( bLastSpecies ){
+                        tmp.reset();
+                    }
                 }
             }
 
