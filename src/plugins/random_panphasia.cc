@@ -155,9 +155,23 @@ void RNG_panphasia::Run_Panphasia_Highorder(Grid_FFT<real_t> &g)
 
   //======================= FFTW ==============================
 
-  ptrdiff_t alloc_local, local_n0, local_0_start;
+  size_t N_pan = PANPHASIA2::descriptor_base_size << rel_level;
+  size_t N0 = fdim * N_pan;
 
-  size_t N0 = fdim * (PANPHASIA2::descriptor_base_size << rel_level);
+  if ((N_pan % 2 == 0) && (sizeof(PAN_REAL) == sizeof(FFTW_REAL)) && (grid_res_ <= N0))
+  {
+    g.FourierTransformForward(false);
+    FFTW_COMPLEX *target_field = reinterpret_cast<FFTW_COMPLEX *>(&g.data_[0]);
+
+    if ((error = PANPHASIA2::PANPHASIA_compute_kspace_field_cropped_(
+            rel_level, N0, grid_res_, grid_res_, g.local_1_size_, g.local_1_start_, target_field)))
+    {
+      music::elog << "Error code from PANPHASIA_compute ...  (ErrCode = " << error << ")" << std::endl;
+    }
+    return;
+  }
+
+  ptrdiff_t alloc_local, local_n0, local_0_start;
 
   alloc_local = FFTW_MPI_LOCAL_SIZE_3D(N0, N0, N0 + 2, MPI_COMM_WORLD, &local_n0, &local_0_start);
 
@@ -178,7 +192,8 @@ void RNG_panphasia::Run_Panphasia_Highorder(Grid_FFT<real_t> &g)
 
   // Panphasia_White_Noise_Field = FFTW_ALLOC_COMPLEX(alloc_local);
 
-  if ((error = PANPHASIA2::PANPHASIA_compute_kspace_field_(rel_level, N0, local_n0, local_0_start, Panphasia_White_Noise_Field)))
+  if ((error = PANPHASIA2::PANPHASIA_compute_kspace_field_cropped_(
+          rel_level, N0, N0, grid_res_, local_n0, local_0_start, Panphasia_White_Noise_Field)))
   {
     music::elog << "Error code from PANPHASIA_compute ...  (ErrCode = " << error << ")" << std::endl;
   };

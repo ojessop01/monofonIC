@@ -97,3 +97,4 @@ void compute_sph_bessel_coeffs(int, int, int, int, double complex *);
 #endif
 
 int PANPHASIA_compute_kspace_field_(size_t, ptrdiff_t, ptrdiff_t, ptrdiff_t, FFTW_COMPLEX *);
+int PANPHASIA_compute_kspace_field_cropped_(size_t, ptrdiff_t, ptrdiff_t, ptrdiff_t, ptrdiff_t, ptrdiff_t, FFTW_COMPLEX *);
