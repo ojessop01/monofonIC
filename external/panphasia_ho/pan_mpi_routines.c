@@ -36,6 +36,14 @@ static FFTW_REAL compute_mode_weighting(const double complex *sph_bessel_coeff, 
   return mode_weighting;
 }
 
+typedef struct
+{
+  int peer;
+  int tag;
+  size_t offset_planes;
+  int count_planes;
+} plane_xfer_t;
+
 int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_grid,
                                     ptrdiff_t local_n0_fourier_return, ptrdiff_t local_0_start_fourier_return,
                                     FFTW_COMPLEX *return_field)
@@ -45,8 +53,9 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
   int pmax = 6;
 
-  int mpi_size;
+  int mpi_size, mpi_rank;
   MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
   ptrdiff_t N0_pan_grid = descriptor_base_size << relative_level;
 
@@ -57,7 +66,14 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
   size_t nfft_dim = N0_fourier_grid;
   size_t npan_dim = N0_pan_grid;
 
-  int SHARED_FOUR_PAN_SPACE = (mpi_size == 1) && (N0_pan_grid % 2 == 0) && (sizeof(PAN_REAL) == sizeof(FFTW_REAL));
+  int USE_SMALL_FFT = (N0_pan_grid % 2 == 0) && (sizeof(PAN_REAL) == sizeof(FFTW_REAL));
+  int SHARED_FOUR_PAN_SPACE = USE_SMALL_FFT && (mpi_size == 1);
+
+  if (!USE_SMALL_FFT && mpi_rank == 0)
+  {
+    printf("PANPHASIA: falling back to zero-stuffed %td^3 FFT (N_P = %td)\n",
+           N0_fourier_grid, N0_pan_grid);
+  }
 
   int nsubdivide = SHARED_FOUR_PAN_SPACE ? 1 : 21; //(pmax%2==0)?pmax+1:pmax+2;
 
@@ -70,9 +86,10 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
   int verbose = 1;
   int flag_output_mode = 2;
   int error;
-  ptrdiff_t size_to_alloc_fourier;
-  ptrdiff_t size_to_alloc_pan;
-  ptrdiff_t local_fourier_x_start, local_fourier_x_end;
+  ptrdiff_t size_to_alloc_fourier = 0;
+  ptrdiff_t size_to_alloc_pan = 0;
+  ptrdiff_t size_to_alloc_pan_fft = 0;
+  ptrdiff_t local_fourier_x_start = 1, local_fourier_x_end = 0;
   FFTW_PLAN output_coeff_forward_plan;
 
   ////////////////////////////////////////////////////////////////////////////////////
@@ -133,51 +150,69 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
       return (100033);
     };
 
-    ptrdiff_t abs_fourier_x_start, abs_fourier_x_end;
-
-    if (local_0_start_fourier_return % fdim == 0)
-    {
-      abs_fourier_x_start = local_0_start_fourier_return;
-    }
-    else
-    {
-      abs_fourier_x_start = local_0_start_fourier_return + fdim - (local_0_start_fourier_return % fdim);
-    };
-
-    if ((local_0_start_fourier_return + local_n0_fourier_return - 1) % fdim == 0)
-    {
-      abs_fourier_x_end = local_0_start_fourier_return + local_n0_fourier_return - 1;
-    }
-    else
-    {
-      abs_fourier_x_end = (local_0_start_fourier_return + local_n0_fourier_return - 1) -
-                          ((local_0_start_fourier_return + local_n0_fourier_return - 1) % fdim);
-    };
-
-    if ((abs_fourier_x_end - abs_fourier_x_start) % fdim != 0)
-      return (100036);
-
-    local_0_start_pan = abs_fourier_x_start / fdim;
-    local_n0_pan = 1 + (abs_fourier_x_end - abs_fourier_x_start) / fdim;
-
-    local_fourier_x_start = abs_fourier_x_start - local_0_start_fourier_return;
-    local_fourier_x_end = abs_fourier_x_end - local_0_start_fourier_return;
-
-    // const ptrdiff_t ndimens_alloc_pan[] = {N0_pan_grid, N0_pan_grid, N0_pan_grid+2};
-    howmany = ncopy;
-
-    if (SHARED_FOUR_PAN_SPACE)
+    if (USE_SMALL_FFT)
     {
       const ptrdiff_t ndimens_alloc_pan[] = {N0_pan_grid, N0_pan_grid, N0_pan_grid + 2};
       ptrdiff_t local_n0_pan_fft, local_0_start_pan_fft;
-      size_to_alloc_pan = FFTW_MPI_LOCAL_SIZE_MANY(rank, ndimens_alloc_pan, howmany,
-                                                   FFTW_MPI_DEFAULT_BLOCK, MPI_COMM_WORLD,
-                                                   &local_n0_pan_fft, &local_0_start_pan_fft);
-      if ((local_0_start_pan_fft != local_0_start_pan) || (local_n0_pan_fft != local_n0_pan))
-        return (100037);
+      size_to_alloc_pan_fft = FFTW_MPI_LOCAL_SIZE_MANY(rank, ndimens_alloc_pan, nchunk,
+                                                       FFTW_MPI_DEFAULT_BLOCK, MPI_COMM_WORLD,
+                                                       &local_n0_pan_fft, &local_0_start_pan_fft);
+      local_0_start_pan = local_0_start_pan_fft;
+      local_n0_pan = local_n0_pan_fft;
+      if (SHARED_FOUR_PAN_SPACE)
+      {
+        if ((local_0_start_pan_fft != 0) || (local_n0_pan_fft != N0_pan_grid))
+          return (100037);
+        size_to_alloc_pan = size_to_alloc_pan_fft;
+      }
+      else
+      {
+        size_to_alloc_pan = (ptrdiff_t)ncopy * local_n0_pan * N0_pan_grid * (N0_pan_grid + 2);
+      }
     }
     else
     {
+      ptrdiff_t abs_fourier_x_start, abs_fourier_x_end;
+
+      if (local_0_start_fourier_return % fdim == 0)
+      {
+        abs_fourier_x_start = local_0_start_fourier_return;
+      }
+      else
+      {
+        abs_fourier_x_start = local_0_start_fourier_return + fdim - (local_0_start_fourier_return % fdim);
+      };
+
+      if ((local_0_start_fourier_return + local_n0_fourier_return - 1) % fdim == 0)
+      {
+        abs_fourier_x_end = local_0_start_fourier_return + local_n0_fourier_return - 1;
+      }
+      else
+      {
+        abs_fourier_x_end = (local_0_start_fourier_return + local_n0_fourier_return - 1) -
+                            ((local_0_start_fourier_return + local_n0_fourier_return - 1) % fdim);
+      };
+
+      if (local_n0_fourier_return <= 0 || abs_fourier_x_end < abs_fourier_x_start)
+      {
+        local_0_start_pan = 0;
+        local_n0_pan = 0;
+        local_fourier_x_start = 1;
+        local_fourier_x_end = 0;
+      }
+      else
+      {
+        if ((abs_fourier_x_end - abs_fourier_x_start) % fdim != 0)
+          return (100036);
+
+        local_0_start_pan = abs_fourier_x_start / fdim;
+        local_n0_pan = 1 + (abs_fourier_x_end - abs_fourier_x_start) / fdim;
+
+        local_fourier_x_start = abs_fourier_x_start - local_0_start_fourier_return;
+        local_fourier_x_end = abs_fourier_x_end - local_0_start_fourier_return;
+      }
+
+      howmany = ncopy;
       size_to_alloc_pan = howmany * local_n0_pan * N0_pan_grid * (N0_pan_grid + 2);
     };
 
@@ -189,10 +224,10 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
   ///////////////////////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////////////////////
-  // Allocate arrays to store Panphasia coefficients and Fourier information
-  // If nsubdivide==1 then use the same structure to store both.
+  // Allocate array to store Panphasia coefficients and compute them before allocating
+  // FFT/exchange workspace, so the octree workspace is freed before FFT buffers are allocated.
 
-  void *panphasia_coefficients = FFTW_MALLOC(sizeof(PAN_REAL) * size_to_alloc_pan);
+  void *panphasia_coefficients = FFTW_MALLOC(sizeof(PAN_REAL) * (size_to_alloc_pan > 0 ? size_to_alloc_pan : 1));
   void *fourier_grids = NULL;
 
   if (panphasia_coefficients == NULL)
@@ -203,29 +238,11 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
   FFTW_COMPLEX *ptr_cmplx_fourier_grid;
 
-  if (SHARED_FOUR_PAN_SPACE)
-  {
-    ptr_real_fourier_grid = panphasia_coefficients;
-    ptr_cmplx_fourier_grid = panphasia_coefficients;
-  }
-  else
-  {
-
-    fourier_grids = FFTW_MALLOC(sizeof(FFTW_REAL) * size_to_alloc_fourier);
-
-    if (fourier_grids == NULL)
-      return (100041);
-
-    ptr_real_fourier_grid = fourier_grids;
-    ptr_cmplx_fourier_grid = fourier_grids;
-  };
-  ///////////////////////////////////////////////////////////////////////////////////////////////
-  //////////////////////////////////////////////////////////////////////////////////////////////
-
   ///////////////////////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////////////////////
   //////////// Compute the Panphasia coefficients   ////////////////////////////////
 
+  if (local_n0_pan > 0)
   {
 
     size_t xorigin = local_0_start_pan, yorigin = 0, zorigin = 0;
@@ -236,6 +253,23 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
                                                  &zextent, copy_list, &ncopy, panphasia_coefficients,
                                                  &flag_output_mode, &verbose)))
       return (100100 + error);
+  };
+
+  if (SHARED_FOUR_PAN_SPACE)
+  {
+    ptr_real_fourier_grid = panphasia_coefficients;
+    ptr_cmplx_fourier_grid = panphasia_coefficients;
+  }
+  else
+  {
+    ptrdiff_t fft_alloc = USE_SMALL_FFT ? size_to_alloc_pan_fft : size_to_alloc_fourier;
+    fourier_grids = FFTW_MALLOC(sizeof(FFTW_REAL) * (fft_alloc > 0 ? fft_alloc : 2));
+
+    if (fourier_grids == NULL)
+      return (100041);
+
+    ptr_real_fourier_grid = fourier_grids;
+    ptr_cmplx_fourier_grid = fourier_grids;
   };
   ///////////////////////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////////////////////
@@ -282,7 +316,7 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
   {
     int rank = 3;
-    ptrdiff_t n_fft_plan = SHARED_FOUR_PAN_SPACE ? N0_pan_grid : N0_fourier_grid;
+    ptrdiff_t n_fft_plan = USE_SMALL_FFT ? N0_pan_grid : N0_fourier_grid;
     const ptrdiff_t ndimens[3] = {n_fft_plan, n_fft_plan, n_fft_plan};
     ptrdiff_t howmany = nchunk;
     ptrdiff_t block = FFTW_MPI_DEFAULT_BLOCK;
@@ -300,6 +334,153 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
     };
   };
 
+  // Set up plane pointers and MPI plane exchange schedule for the N_P FFT path
+  size_t plane_cmplx_count = (size_t)nchunk * npan_dim * (npan_dim / 2 + 1);
+  FFTW_COMPLEX **plane_ptr = NULL;
+  FFTW_COMPLEX *recv_buf = NULL;
+  plane_xfer_t *recv_runs = NULL;
+  plane_xfer_t *send_runs = NULL;
+  size_t n_recv_runs = 0, n_send_runs = 0;
+  MPI_Request *xfer_reqs = NULL;
+  MPI_Datatype row_mpi_type = MPI_DATATYPE_NULL, plane_mpi_type = MPI_DATATYPE_NULL;
+  int have_mpi_types = 0;
+
+  if (USE_SMALL_FFT)
+  {
+    plane_ptr = calloc(npan_dim, sizeof(FFTW_COMPLEX *));
+    if (plane_ptr == NULL)
+      return (100042);
+
+    for (ptrdiff_t lp = 0; lp < local_n0_pan; lp++)
+    {
+      plane_ptr[local_0_start_pan + lp] = ptr_cmplx_fourier_grid + (size_t)lp * plane_cmplx_count;
+    }
+
+    if (!SHARED_FOUR_PAN_SPACE)
+    {
+      long long my_start = (long long)local_0_start_pan;
+      long long my_count = (long long)local_n0_pan;
+      long long *pan_starts = malloc(sizeof(long long) * (size_t)mpi_size);
+      long long *pan_counts = malloc(sizeof(long long) * (size_t)mpi_size);
+      unsigned char *need_remote = calloc(npan_dim, sizeof(unsigned char));
+      unsigned char *all_need = malloc((size_t)mpi_size * npan_dim);
+      size_t *recv_slot_of_plane = malloc(sizeof(size_t) * npan_dim);
+
+      if (!pan_starts || !pan_counts || !need_remote || !all_need || !recv_slot_of_plane)
+        return (100043);
+
+      MPI_Allgather(&my_start, 1, MPI_LONG_LONG, pan_starts, 1, MPI_LONG_LONG, MPI_COMM_WORLD);
+      MPI_Allgather(&my_count, 1, MPI_LONG_LONG, pan_counts, 1, MPI_LONG_LONG, MPI_COMM_WORLD);
+
+      for (ptrdiff_t ix = 0; ix < local_n0_fourier_return; ix++)
+      {
+        size_t ix_p = (size_t)(ix + local_0_start_fourier_return) % npan_dim;
+        need_remote[ix_p] = 1;
+        if (nfft_dim / 2 > npan_dim / 2)
+        {
+          size_t ix_p_conj = (ix_p == 0) ? 0 : (npan_dim - ix_p);
+          need_remote[ix_p_conj] = 1;
+        }
+      }
+
+      for (ptrdiff_t lp = 0; lp < local_n0_pan; lp++)
+        need_remote[local_0_start_pan + lp] = 0;
+
+      MPI_Allgather(need_remote, (int)npan_dim, MPI_UNSIGNED_CHAR,
+                    all_need, (int)npan_dim, MPI_UNSIGNED_CHAR, MPI_COMM_WORLD);
+
+      recv_runs = malloc(sizeof(plane_xfer_t) * (npan_dim > 0 ? npan_dim : 1));
+      send_runs = malloc(sizeof(plane_xfer_t) * ((size_t)mpi_size * (size_t)(local_n0_pan > 0 ? local_n0_pan : 1)));
+      if (!recv_runs || !send_runs)
+        return (100044);
+
+      size_t total_recv_planes = 0;
+      for (int owner = 0; owner < mpi_size; owner++)
+      {
+        if (owner == mpi_rank || pan_counts[owner] <= 0)
+          continue;
+        size_t s0 = (size_t)pan_starts[owner];
+        size_t s1 = s0 + (size_t)pan_counts[owner];
+        int tag = 0;
+        size_t p = s0;
+        while (p < s1)
+        {
+          while (p < s1 && !need_remote[p])
+            p++;
+          if (p >= s1)
+            break;
+          size_t p_start = p;
+          while (p < s1 && need_remote[p])
+          {
+            recv_slot_of_plane[p] = total_recv_planes + (p - p_start);
+            p++;
+          }
+          int len = (int)(p - p_start);
+          recv_runs[n_recv_runs].peer = owner;
+          recv_runs[n_recv_runs].tag = tag++;
+          recv_runs[n_recv_runs].offset_planes = total_recv_planes;
+          recv_runs[n_recv_runs].count_planes = len;
+          n_recv_runs++;
+          total_recv_planes += (size_t)len;
+        }
+      }
+
+      for (int dest = 0; dest < mpi_size; dest++)
+      {
+        if (dest == mpi_rank || local_n0_pan <= 0)
+          continue;
+        const unsigned char *dest_need = all_need + (size_t)dest * npan_dim;
+        int tag = 0;
+        ptrdiff_t lp = 0;
+        while (lp < local_n0_pan)
+        {
+          while (lp < local_n0_pan && !dest_need[local_0_start_pan + lp])
+            lp++;
+          if (lp >= local_n0_pan)
+            break;
+          ptrdiff_t lp_start = lp;
+          while (lp < local_n0_pan && dest_need[local_0_start_pan + lp])
+            lp++;
+          send_runs[n_send_runs].peer = dest;
+          send_runs[n_send_runs].tag = tag++;
+          send_runs[n_send_runs].offset_planes = (size_t)lp_start;
+          send_runs[n_send_runs].count_planes = (int)(lp - lp_start);
+          n_send_runs++;
+        }
+      }
+
+      if (total_recv_planes > 0)
+      {
+        recv_buf = FFTW_MALLOC(sizeof(FFTW_COMPLEX) * total_recv_planes * plane_cmplx_count);
+        if (recv_buf == NULL)
+          return (100045);
+        for (size_t p = 0; p < npan_dim; p++)
+        {
+          if (need_remote[p])
+            plane_ptr[p] = recv_buf + recv_slot_of_plane[p] * plane_cmplx_count;
+        }
+      }
+
+      size_t total_reqs = n_recv_runs + n_send_runs;
+      xfer_reqs = malloc(sizeof(MPI_Request) * (total_reqs > 0 ? total_reqs : 1));
+      if (xfer_reqs == NULL)
+        return (100046);
+
+      MPI_Datatype real_mpi_type = (sizeof(FFTW_REAL) == sizeof(double)) ? MPI_DOUBLE : MPI_FLOAT;
+      MPI_Type_contiguous((int)(2 * (size_t)nchunk * (npan_dim / 2 + 1)), real_mpi_type, &row_mpi_type);
+      MPI_Type_commit(&row_mpi_type);
+      MPI_Type_contiguous((int)npan_dim, row_mpi_type, &plane_mpi_type);
+      MPI_Type_commit(&plane_mpi_type);
+      have_mpi_types = 1;
+
+      free(recv_slot_of_plane);
+      free(all_need);
+      free(need_remote);
+      free(pan_counts);
+      free(pan_starts);
+    }
+  }
+
   //printf("Plan completed ... \n");
 
   //////////////////////////////////////////////////////////////////////////
@@ -315,37 +496,84 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
     if (!SHARED_FOUR_PAN_SPACE)
     {
+      if (USE_SMALL_FFT)
+      {
+#ifdef USE_OPENMP
+#pragma omp parallel for collapse(2)
+#endif
+        for (ptrdiff_t ix_p = 0; ix_p < local_n0_pan; ix_p++)
+          for (size_t iy_p = 0; iy_p < npan_dim; iy_p++)
+          {
+            size_t row_base = (size_t)ix_p * npan_dim * (npan_dim + 2) + iy_p * (npan_dim + 2);
+            for (size_t iz_p = 0; iz_p < npan_dim; iz_p++)
+            {
+              size_t idx = row_base + iz_p;
+              for (int m = 0; m < nchunk; m++)
+              {
+                ptr_real_fourier_grid[nchunk * idx + m] =
+                    ptr_panphasia_coefficients[ncopy * idx + moffset + m];
+              }
+            }
+            for (size_t iz_p = npan_dim; iz_p < npan_dim + 2; iz_p++)
+            {
+              size_t idx = row_base + iz_p;
+              for (int m = 0; m < nchunk; m++)
+                ptr_real_fourier_grid[nchunk * idx + m] = 0.0;
+            }
+          }
+      }
+      else
+      {
+        memset(ptr_real_fourier_grid, 0, sizeof(FFTW_REAL) * size_to_alloc_fourier);
 
-      memset(ptr_real_fourier_grid, 0, sizeof(FFTW_REAL) * size_to_alloc_fourier);
+        // Copy Panphasia coefficients to Fourier grid with appropriate stride - fdim
 
-      // Copy Panphasia coefficients to Fourier grid with appropriate stride - fdim
+        size_t index_p, index_f;
+        int m;
 
-      size_t index_p, index_f;
-      int m;
-
-      for (int ix_f = local_fourier_x_start, ix_p = 0; ix_f <= local_fourier_x_end; ix_f += fdim, ix_p++)
+        for (int ix_f = local_fourier_x_start, ix_p = 0; ix_f <= local_fourier_x_end; ix_f += fdim, ix_p++)
 #ifdef USE_OPENMP
 #pragma omp parallel for collapse(2) private(index_p, index_f, m)
 #endif
 
-        for (size_t iy_p = 0; iy_p < npan_dim; iy_p++)
-          for (size_t iz_p = 0; iz_p < npan_dim; iz_p++)
-          {
-            size_t iy_f = iy_p * fdim;
-            size_t iz_f = iz_p * fdim;
-            index_p = ix_p * N0_pan_grid * (N0_pan_grid + 2) + iy_p * (N0_pan_grid + 2) + iz_p;
-            index_f = ix_f * N0_fourier_grid * (N0_fourier_grid + 2) + iy_f * (N0_fourier_grid + 2) + iz_f;
-
-            for (m = 0; m < nchunk; m++)
+          for (size_t iy_p = 0; iy_p < npan_dim; iy_p++)
+            for (size_t iz_p = 0; iz_p < npan_dim; iz_p++)
             {
-              ptr_real_fourier_grid[nchunk * index_f + m] =
-                  ptr_panphasia_coefficients[ncopy * index_p + moffset + m];
+              size_t iy_f = iy_p * fdim;
+              size_t iz_f = iz_p * fdim;
+              index_p = ix_p * N0_pan_grid * (N0_pan_grid + 2) + iy_p * (N0_pan_grid + 2) + iz_p;
+              index_f = ix_f * N0_fourier_grid * (N0_fourier_grid + 2) + iy_f * (N0_fourier_grid + 2) + iz_f;
+
+              for (m = 0; m < nchunk; m++)
+              {
+                ptr_real_fourier_grid[nchunk * index_f + m] =
+                    ptr_panphasia_coefficients[ncopy * index_p + moffset + m];
+              };
             };
-          };
+      }
     };
 
     FFTW_MPI_EXECUTE_DFT_R2C(output_coeff_forward_plan,
                              ptr_real_fourier_grid, ptr_cmplx_fourier_grid);
+
+    if (USE_SMALL_FFT && !SHARED_FOUR_PAN_SPACE)
+    {
+      int nreq = 0;
+      for (size_t r = 0; r < n_recv_runs; r++)
+      {
+        MPI_Irecv(recv_buf + recv_runs[r].offset_planes * plane_cmplx_count,
+                  recv_runs[r].count_planes, plane_mpi_type,
+                  recv_runs[r].peer, recv_runs[r].tag, MPI_COMM_WORLD, &xfer_reqs[nreq++]);
+      }
+      for (size_t s = 0; s < n_send_runs; s++)
+      {
+        MPI_Isend(ptr_cmplx_fourier_grid + send_runs[s].offset_planes * plane_cmplx_count,
+                  send_runs[s].count_planes, plane_mpi_type,
+                  send_runs[s].peer, send_runs[s].tag, MPI_COMM_WORLD, &xfer_reqs[nreq++]);
+      }
+      if (nreq > 0)
+        MPI_Waitall(nreq, xfer_reqs, MPI_STATUSES_IGNORE);
+    }
 
     {
       // Convolve and combine the FT of the Panphasia coefficient field
@@ -362,9 +590,10 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
           for (int iz = 0; iz <= nfft_dim / 2; iz++)
           {
             index1 = ix * N0_fourier_grid * (N0_fourier_grid / 2 + 1) + iy * (N0_fourier_grid / 2 + 1) + iz;
+            const FFTW_COMPLEX *src_cmplx;
             size_t base_index2;
             int use_conj = 0;
-            if (SHARED_FOUR_PAN_SPACE)
+            if (USE_SMALL_FFT)
             {
               size_t ix_p = (size_t)(ix + local_0_start_fourier_return) % npan_dim;
               size_t iy_p = (size_t)iy % npan_dim;
@@ -376,17 +605,19 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
                 iz_p = npan_dim - iz_p;
                 use_conj = 1;
               };
-              base_index2 = nchunk * (ix_p * N0_pan_grid * (N0_pan_grid / 2 + 1) + iy_p * (N0_pan_grid / 2 + 1) + iz_p);
+              src_cmplx = plane_ptr[ix_p];
+              base_index2 = (size_t)nchunk * (iy_p * (npan_dim / 2 + 1) + iz_p);
             }
             else
             {
-              base_index2 = nchunk * index1;
+              src_cmplx = ptr_cmplx_fourier_grid;
+              base_index2 = (size_t)nchunk * index1;
             };
             FFTW_COMPLEX sum = return_field[index1];
             for (int m = 0; m < nchunk; m++)
             {
               index2 = base_index2 + m;
-              double complex coeff = ptr_cmplx_fourier_grid[index2];
+              double complex coeff = src_cmplx[index2];
               if (use_conj)
                 coeff = conj(coeff);
 
@@ -567,6 +798,7 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
     //printf("Transpose plan completed.\n");
 
     FFTW_MPI_EXECUTE_R2R(transpose_output_plan, ptr_return_as_real_field, ptr_return_as_real_field);
+    FFTW_DESTROY_PLAN(transpose_output_plan);
 
     //printf("Transpose completed.\n");
   };
@@ -577,6 +809,20 @@ int PANPHASIA_compute_kspace_field_(size_t relative_level, ptrdiff_t N0_fourier_
 
   if (!SHARED_FOUR_PAN_SPACE)
     FFTW_FREE(fourier_grids);
+
+  if (recv_buf != NULL)
+    FFTW_FREE(recv_buf);
+
+  free(plane_ptr);
+  free(recv_runs);
+  free(send_runs);
+  free(xfer_reqs);
+
+  if (have_mpi_types)
+  {
+    MPI_Type_free(&plane_mpi_type);
+    MPI_Type_free(&row_mpi_type);
+  }
 
   FFTW_DESTROY_PLAN(output_coeff_forward_plan);
 
