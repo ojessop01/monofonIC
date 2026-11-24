@@ -17,9 +17,113 @@
 
 #include <general.hh>
 #include <grid_fft.hh>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 
 #include "memory_stat.hh"
+
+namespace
+{
+
+#if defined(USE_FFTW_THREADS)
+int choose_fft_threads(const std::array<size_t, 3> &n, bool distributed)
+{
+    constexpr int max_fft_threads = 64;
+    constexpr size_t min_cells_per_thread = 12288;
+
+    int nt = std::min(CONFIG::num_threads, max_fft_threads);
+    const size_t total_cells = n[0] * n[1] * n[2];
+    const size_t ntasks = distributed ? static_cast<size_t>(std::max(1, CONFIG::MPI_task_size)) : 1;
+    const size_t cells_per_rank = total_cells / ntasks;
+
+    while (nt > 1 && cells_per_rank < static_cast<size_t>(nt) * min_cells_per_thread)
+        nt = (nt + 1) / 2;
+
+    return std::max(1, nt);
+}
+
+#if !defined(FFTW_MODE_PATIENT) && !defined(FFTW_MODE_MEASURE)
+// Under FFTW_ESTIMATE, FFTW assigns zero cost to thread barriers and at high
+// thread counts can pick an unthreaded outer buffered loop that spawns nested
+// thread teams per 8-row batch (e.g. 96^3 at >=24 threads, 192^3 at >=48,
+// 752^3 at >=96). Detect this in the printed plan and step down the thread count.
+bool plan_has_unthreaded_outer_buffer(fftw_plan_t p)
+{
+    if (p == nullptr)
+        return false;
+    char *s = FFTW_API(sprint_plan)(p);
+    if (s == nullptr)
+        return false;
+    const char *thr = std::strstr(s, "-thr-");
+    bool bad = false;
+    if (thr != nullptr)
+    {
+        for (const char *tag : {"(rdft2-buffered-", "(dft-buffered-", "(rdft-buffered-"})
+        {
+            const char *pos = std::strstr(s, tag);
+            if (pos != nullptr && pos < thr)
+            {
+                bad = true;
+                break;
+            }
+        }
+    }
+    std::free(s);
+    return bad;
+}
+#endif
+#endif
+
+template <typename CreateFn>
+void create_grid_fft_plans(const std::array<size_t, 3> &n, bool distributed,
+                           fftw_plan_t &plan, fftw_plan_t &iplan, CreateFn &&create_plans)
+{
+#if defined(USE_FFTW_THREADS)
+    if (CONFIG::FFTW_threads_ok)
+    {
+        int nt = choose_fft_threads(n, distributed);
+        for (;;)
+        {
+            FFTW_API(plan_with_nthreads)(nt);
+            create_plans(plan, iplan);
+#if !defined(FFTW_MODE_PATIENT) && !defined(FFTW_MODE_MEASURE)
+            if (nt > 1)
+            {
+                int local_bad = (plan_has_unthreaded_outer_buffer(plan) ||
+                                 plan_has_unthreaded_outer_buffer(iplan))
+                                    ? 1
+                                    : 0;
+                int any_bad = local_bad;
+#if defined(USE_MPI)
+                if (distributed)
+                    MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+#endif
+                if (any_bad)
+                {
+                    FFTW_API(destroy_plan)(plan);
+                    FFTW_API(destroy_plan)(iplan);
+                    plan = nullptr;
+                    iplan = nullptr;
+                    nt = (nt + 1) / 2;
+                    continue;
+                }
+            }
+#endif
+            break;
+        }
+        FFTW_API(plan_with_nthreads)(CONFIG::num_threads);
+        return;
+    }
+#else
+    _unused(n);
+    _unused(distributed);
+#endif
+    create_plans(plan, iplan);
+}
+
+} // namespace
 
 void memory_report(void) 
 {
@@ -50,16 +154,20 @@ void Grid_FFT<data_t, bdistributed>::allocate(void)
             data_ = reinterpret_cast<data_t *>(FFTW_API(malloc)(ntot_ * sizeof(real_t)));
             cdata_ = reinterpret_cast<ccomplex_t *>(data_);
 
-            plan_ = FFTW_API(plan_dft_r2c_3d)(n_[0], n_[1], n_[2], (real_t *)data_, (complex_t *)data_, FFTW_RUNMODE);
-            iplan_ = FFTW_API(plan_dft_c2r_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (real_t *)data_, FFTW_RUNMODE);
+            create_grid_fft_plans(n_, false, plan_, iplan_, [&](fftw_plan_t &p, fftw_plan_t &ip) {
+                p = FFTW_API(plan_dft_r2c_3d)(n_[0], n_[1], n_[2], (real_t *)data_, (complex_t *)data_, FFTW_RUNMODE);
+                ip = FFTW_API(plan_dft_c2r_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (real_t *)data_, FFTW_RUNMODE);
+            });
         }
         else if (typeid(data_t) == typeid(ccomplex_t))
         {
             data_ = reinterpret_cast<data_t *>(FFTW_API(malloc)(ntot_ * sizeof(ccomplex_t)));
             cdata_ = reinterpret_cast<ccomplex_t *>(data_);
 
-            plan_ = FFTW_API(plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_, FFTW_FORWARD, FFTW_RUNMODE);
-            iplan_ = FFTW_API(plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_, FFTW_BACKWARD, FFTW_RUNMODE);
+            create_grid_fft_plans(n_, false, plan_, iplan_, [&](fftw_plan_t &p, fftw_plan_t &ip) {
+                p = FFTW_API(plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_, FFTW_FORWARD, FFTW_RUNMODE);
+                ip = FFTW_API(plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_, FFTW_BACKWARD, FFTW_RUNMODE);
+            });
         }
         else
         {
@@ -122,10 +230,12 @@ void Grid_FFT<data_t, bdistributed>::allocate(void)
             ntot_ = local_0_size_ * n_[1] * (n_[2]+2);
             data_ = (data_t *)FFTW_API(malloc)(ntot_ * sizeof(real_t));
             cdata_ = reinterpret_cast<ccomplex_t *>(data_);
-            plan_ = FFTW_API(mpi_plan_dft_r2c_3d)(n_[0], n_[1], n_[2], (real_t *)data_, (complex_t *)data_,
+            create_grid_fft_plans(n_, true, plan_, iplan_, [&](fftw_plan_t &p, fftw_plan_t &ip) {
+                p = FFTW_API(mpi_plan_dft_r2c_3d)(n_[0], n_[1], n_[2], (real_t *)data_, (complex_t *)data_,
                                                   MPI_COMM_WORLD, FFTW_RUNMODE | FFTW_MPI_TRANSPOSED_OUT);
-            iplan_ = FFTW_API(mpi_plan_dft_c2r_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (real_t *)data_,
+                ip = FFTW_API(mpi_plan_dft_c2r_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (real_t *)data_,
                                                    MPI_COMM_WORLD, FFTW_RUNMODE | FFTW_MPI_TRANSPOSED_IN);
+            });
         }
         else if (typeid(data_t) == typeid(ccomplex_t))
         {
@@ -134,10 +244,12 @@ void Grid_FFT<data_t, bdistributed>::allocate(void)
             ntot_ = cmplxsz;
             data_ = (data_t *)FFTW_API(malloc)(ntot_ * sizeof(ccomplex_t));
             cdata_ = reinterpret_cast<ccomplex_t *>(data_);
-            plan_ = FFTW_API(mpi_plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_,
+            create_grid_fft_plans(n_, true, plan_, iplan_, [&](fftw_plan_t &p, fftw_plan_t &ip) {
+                p = FFTW_API(mpi_plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_,
                                               MPI_COMM_WORLD, FFTW_FORWARD, FFTW_RUNMODE | FFTW_MPI_TRANSPOSED_OUT);
-            iplan_ = FFTW_API(mpi_plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_,
+                ip = FFTW_API(mpi_plan_dft_3d)(n_[0], n_[1], n_[2], (complex_t *)data_, (complex_t *)data_,
                                                MPI_COMM_WORLD, FFTW_BACKWARD, FFTW_RUNMODE | FFTW_MPI_TRANSPOSED_IN);
+            });
         }
         else
         {
