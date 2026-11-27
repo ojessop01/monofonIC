@@ -128,7 +128,7 @@ public:
     pmgrid_ = 2*cf_.get_value<double>("setup", "GridRes");
     gridboost_ = 1;
     softening_ = cf_.get_value<double>("setup", "BoxLength")/pmgrid_/20;
-    doBaryons_ = cf_.get_value<bool>("setup", "DoBaryons");
+    doBaryons_ = cf_.get_value_safe<bool>("setup", "DoBaryons", false);
 #if !defined(USE_SINGLEPRECISION)
     doublePrec_ = 1;
 #else
